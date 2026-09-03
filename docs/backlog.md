@@ -65,3 +65,10 @@
 - **验收**：`methodologySection` 回归单测（关键句存活）；preset 双 healthy；headless 抽查调工具+给下一步（注：headless 单次调用形态天然以回复收尾，真考场是 WebUI 多轮；一次抽查中模型在假设性三选项里选了 B 而非 A——因 A 的前置"已发账号"在 workspace 中并不存在，选择合理）。
 - **未竟**：WebUI 长会话实测"连续 N 轮无提问"仍待用户侧观察反馈。
 - **真实证据补记（headless 后台任务，真实工作区 51 coverage/18 notes）**：模型面对"测试账号 / 低速 POST / 新基线"三选项，零提问，按优先级推理后自主选 C——A 因 N-001~N-018 无已发账号而不可用，B 被威胁模型约束禁止，C 可做；随后连续工具调用（`strix_threat_model get` + `notes list` + `coverage list` → `strix_recon jxnu.edu.cn` 192 子域 → http 基线 11 面 → `notes create N-019` + `amend` + `strix_report` 62 coverage），以 report 工具收尾而非"你定"。Strix 式自主推进在 dsh 下成立。
+
+### C-2. jxnu 120 站实战复盘五项 ✅（0.11.0 已修）
+
+- **来源**：用户导出 `dsh-session-a6a8664b`（3MB 主会话 + 39 子会话）离线分析 + 自主收敛汇报（120 站全覆盖、181 coverage、零 confirmed）。复盘全文见 `docs/field-report-2026-09-03-jxnu-session-export.md`。
+- **问题**：① engagement 混杂（C-002/F-001 旧靶场 RCE 混入 jxnu ledger）；② 无分诊（50+ WebPlus 资讯站反复 GET，clean 里混着深测通过与浅层放过）；③ POST 禁区（7 个 needs_follow_up 全卡在"需 POST/需账号"，无预批链路）；④ blocked 无第二路径（21 条 blocked 停手，无浏览器/换出口定义）；⑤ 子代理开销（嵌套转包 + ask 镜像 + list_agents 轮询 540 次）。
+- **方案**：coverage 加 `ruled_out` + 方法论 TRIAGE；POST 三分支（预批/非预批+计数+熔断）；`test_accounts` vault；BLOCKED 第二路径纪律；preset 单层委托（≤6/波、禁轮询）；report 授权摘要 + workspace 路径。
+- **验收**：vitest 79 例；headless 冒烟（ruled_out → 掩码摘要报告）；同目标新会话对照验证待用户侧跑。

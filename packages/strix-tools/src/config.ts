@@ -16,6 +16,12 @@ export interface ConfigType {
   httpTimeoutMs: number
   /** strix_http: maximum response body characters returned to the model. */
   httpMaxBodyChars: number
+  /**
+   * strix_http: per-path cap for non-preapproved POSTs sent under a live
+   * authorization (spray guard). 0 disables the cap. Persisted in
+   * workspace/http-post-counts.json, keyed by path.
+   */
+  httpPostCapPerPath: number
   /** strix_shell: container image used for command execution. */
   shellImage: string
   /**
@@ -84,6 +90,7 @@ export const Config = z
     workspaceDir: z.string().default(''),
     httpTimeoutMs: z.number().default(30_000),
     httpMaxBodyChars: z.number().default(20_000),
+    httpPostCapPerPath: z.number().default(5),
     shellImage: z.string().default('python:3.12-slim'),
     shellAllowedImages: z.array(z.string()).default([]),
     shellNetwork: z.boolean().default(true),

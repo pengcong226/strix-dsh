@@ -1,7 +1,7 @@
 {
   "name": "strix-dsh-tools",
   "description": "StriX-DH: offensive-security tool suite for the DeepSeek Harness — natively re-hosts Strix's pentest capabilities (HTTP client, sandboxed shell, Python exploit box, browser automation, recon, SAST, evidence-bound findings) as dsh tools.",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "type": "module",
   "license": "Apache-2.0",
   "main": "dist/index.js",

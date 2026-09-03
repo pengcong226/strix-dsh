@@ -14,9 +14,10 @@ import { matchesAutoAllow } from '../src/lib/approval.js'
 import { methodologySection } from '../src/index.js'
 import { formatDepFinding, parseOsvVuln, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest } from '../src/tools/http.js'
-import { SEVERITIES, VULN_TYPES, checkDuplicate, listFindings, missingFinishSections, validateFinding } from '../src/tools/finding.js'
-import { readLedger, writeLedger } from '../src/tools/coverage.js'
-import { authorizationPath, isAuthorizationExpired, matchesPreApprovedPost, readAuthorization, renderAuthorizationSection } from '../src/tools/authorization.js'
+import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, listFindings, missingFinishSections, validateFinding } from '../src/tools/finding.js'
+import { OUTCOMES, readLedger, writeLedger } from '../src/tools/coverage.js'
+import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, renderAuthorizationSection } from '../src/tools/authorization.js'
+import { bumpPostCount, postCountsPath, readPostCounts } from '../src/tools/http.js'
 import { budgetPath, checkBudget, formatUsd, priceUsage, readBudget } from '../src/tools/budget.js'
 import { buildBackgroundDockerArgs, jobLabel } from '../src/lib/jobs.js'
 import { mirrorEvent } from '../src/lib/session-mirror.js'
@@ -38,6 +39,7 @@ function scratchConfig(): ConfigType {
     workspaceDir: mkdtempSync(join(tmpdir(), 'strix-test-')),
     httpTimeoutMs: 1000,
     httpMaxBodyChars: 200,
+    httpPostCapPerPath: 5,
     shellImage: 'python:3.12-slim',
     shellAllowedImages: [],
     approvalAutoAllow: [],
@@ -143,6 +145,17 @@ describe('coverage ledger round-trip', () => {
 
   it('returns an empty list when no ledger exists yet', () => {
     expect(readLedger(scratchConfig())).toEqual([])
+  })
+
+  it('accepts ruled_out as a triage closure outcome', () => {
+    expect(OUTCOMES).toContain('ruled_out')
+    const config = scratchConfig()
+    writeLedger(config, [
+      { id: 'C-001', surface: 'https://static.example.com/', risk_area: 'fingerprint', outcome: 'ruled_out', evidence_note: 'no login / no params / static CMS page', recorded_at: 't0' },
+    ])
+    const entries = readLedger(config)
+    expect(entries[0]?.outcome).toBe('ruled_out')
+    expect(entries[0]?.evidence_note).toContain('no login')
   })
 })
 
@@ -383,6 +396,15 @@ describe('methodology autonomy discipline', () => {
     expect(text).toContain('never')
     expect(text).toContain('bare text')
   })
+
+  it('carries triage, blocked-second-path, and engagement-isolation discipline', () => {
+    const text = methodologySection(scratchConfig())
+    expect(text).toContain('TRIAGE')
+    expect(text).toContain('ruled_out')
+    expect(text).toContain('BLOCKED SECOND PATH')
+    expect(text).toContain('ENGAGEMENT ISOLATION')
+    expect(text).toContain('one target set, one workspace')
+  })
 })
 
 describe('truncate', () => {
@@ -521,10 +543,92 @@ describe('authorization attestation', () => {
       ),
     ).toBe(true)
   })
+
+  it('masks test-account passwords in prompt-facing output', () => {
+    const masked = maskTestAccount({ label: 'student-1', username: 's001', password: 's3cret!', login_url: 'https://uis.example.com/login' })
+    expect(masked).toContain('student-1')
+    expect(masked).toContain('s001')
+    expect(masked).toContain('https://uis.example.com/login')
+    expect(masked).toContain('***')
+    expect(masked).not.toContain('s3cret!')
+    const noPw = maskTestAccount({ label: 'auditor', username: 'audit01' })
+    expect(noPw).toContain('not stored')
+  })
+
+  it('renders masked test accounts into the prompt section, never passwords', () => {
+    const config = scratchConfig()
+    writeFileSync(
+      authorizationPath(config),
+      JSON.stringify({
+        targets: ['https://example.com'],
+        granted_by: 'test harness',
+        test_accounts: [{ label: 'student-1', username: 's001', password: 's3cret!' }],
+        recorded_at: 't0',
+      }),
+      'utf8',
+    )
+    const text = renderAuthorizationSection(config)
+    expect(text).toContain('Test accounts (1')
+    expect(text).toContain('s001')
+    expect(text).not.toContain('s3cret!')
+  })
 })
 
-describe('budget ledger', () => {
-  it('prices usage with the configured per-1K rates', () => {
+describe('http POST per-path counter', () => {
+  it('starts empty and increments per path', () => {
+    const config = scratchConfig()
+    expect(readPostCounts(config)).toEqual({})
+    expect(bumpPostCount(config, '/oas/forgetPassword')).toBe(1)
+    expect(bumpPostCount(config, '/oas/forgetPassword')).toBe(2)
+    expect(bumpPostCount(config, '/other')).toBe(1)
+    expect(readPostCounts(config)).toEqual({ '/oas/forgetPassword': 2, '/other': 1 })
+    // Persisted as JSON next to the workspace.
+    expect(JSON.parse(readFileSync(postCountsPath(config), 'utf8'))['/oas/forgetPassword']).toBe(2)
+  })
+
+  it('returns empty on missing or corrupt files instead of throwing', () => {
+    expect(readPostCounts(scratchConfig())).toEqual({})
+    const config = scratchConfig()
+    writeFileSync(postCountsPath(config), '{not json', 'utf8')
+    expect(readPostCounts(config)).toEqual({})
+  })
+
+  it('exposes the configured per-path cap default', () => {
+    expect(scratchConfig().httpPostCapPerPath).toBe(5)
+  })
+})
+
+describe('report authorization summary', () => {
+  it('states none-recorded when no attestation exists', () => {
+    expect(authorizationSummary(scratchConfig())).toEqual([
+      'Authorization: none recorded for this engagement.',
+    ])
+  })
+
+  it('summarizes scope facts with masked test accounts', () => {
+    const config = scratchConfig()
+    writeFileSync(
+      authorizationPath(config),
+      JSON.stringify({
+        targets: ['https://example.com'],
+        granted_by: 'test harness',
+        scope_ref: 'SRC-1',
+        pre_approved_post_paths: [{ path: '/a', body: 'x' }],
+        test_accounts: [{ label: 's1', username: 'u1', password: 'pw-secret' }],
+        recorded_at: 't0',
+      }),
+      'utf8',
+    )
+    const lines = authorizationSummary(config)
+    expect(lines.join('\n')).toContain('Targets: https://example.com')
+    expect(lines.join('\n')).toContain('SRC-1')
+    expect(lines.join('\n')).toContain('Pre-approved POST paths: 1 (/a)')
+    expect(lines.join('\n')).toContain('u1')
+    expect(lines.join('\n')).not.toContain('pw-secret')
+  })
+})
+
+describe('budget ledger', () => {  it('prices usage with the configured per-1K rates', () => {
     const config = scratchConfig()
     // 1000 in + 1000 out at 0.0001/0.0002 → 0.0003.
     expect(priceUsage(config, 1000, 1000)).toBeCloseTo(0.0003, 8)

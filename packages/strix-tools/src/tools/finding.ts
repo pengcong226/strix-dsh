@@ -11,6 +11,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { safeId, workspaceDir, workspaceSub } from '../lib/util.js'
+import { maskTestAccount, readAuthorization } from './authorization.js'
 import { readLedger } from './coverage.js'
 import { writeSarifReport } from './sarif.js'
 
@@ -319,6 +320,30 @@ export function registerFinding(ctx: Context, config: ConfigType) {
 }
 
 /**
+ * Masked authorization summary for reports: targets + grant facts travel in
+ * the clear; test-account passwords NEVER do. Pure — unit-tested.
+ */
+export function authorizationSummary(config: ConfigType): string[] {
+  const auth = readAuthorization(config)
+  if (!auth) return ['Authorization: none recorded for this engagement.']
+  const lines = [
+    'Authorization (operator-recorded attestation):',
+    `- Targets: ${auth.targets.join(', ')}`,
+    `- Granted by: ${auth.granted_by}`,
+  ]
+  if (auth.scope_ref) lines.push(`- Scope reference: ${auth.scope_ref}`)
+  if (auth.valid_until) lines.push(`- Valid until: ${auth.valid_until}`)
+  if (auth.notes) lines.push(`- Constraints: ${auth.notes}`)
+  const pre = auth.pre_approved_post_paths ?? []
+  if (pre.length > 0) lines.push(`- Pre-approved POST paths: ${pre.length} (${pre.map((e) => e.path).join(', ')})`)
+  const accounts = auth.test_accounts ?? []
+  if (accounts.length > 0) {
+    lines.push(`- Test accounts (passwords masked): ${accounts.map(maskTestAccount).join(' | ')}`)
+  }
+  return lines
+}
+
+/**
  * Validate the four required finish sections. Pure — unit-tested.
  * Returns the missing field names (empty = complete).
  */
@@ -423,12 +448,15 @@ export function registerReport(ctx: Context, config: ConfigType) {
           return `Unknown action "${args.action}". Use report | sarif | finish.`
         }
         let coverageLines: string[] = []
+        let ruledOutCount = 0
         const coverageFile = join(workspaceSub(config, 'coverage'), 'ledger.jsonl')
         if (existsSync(coverageFile)) {
-          coverageLines = readFileSync(coverageFile, 'utf8')
+          const parsed = readFileSync(coverageFile, 'utf8')
             .split('\n')
             .filter((l) => l.trim())
             .map((l) => JSON.parse(l) as Record<string, string>)
+          ruledOutCount = parsed.filter((e) => e.outcome === 'ruled_out').length
+          coverageLines = parsed
             .map((e) => `- ${e.surface} — ${e.risk_area}: ${e.outcome}${e.evidence_note ? ` (${e.evidence_note})` : ''}`)
         }
 
@@ -439,10 +467,13 @@ export function registerReport(ctx: Context, config: ConfigType) {
           `# ${title}`,
           '',
           `Generated: ${new Date().toISOString()}`,
+          `Workspace: ${workspaceDir(config)}`,
           '',
           '## Scope & Authorization',
           '',
           args.scope_summary ?? '(not provided)',
+          '',
+          ...authorizationSummary(config),
           '',
           '## Executive Summary',
           '',
@@ -484,6 +515,9 @@ export function registerReport(ctx: Context, config: ConfigType) {
           out.push('', '---', '')
         }
         out.push('## Coverage Ledger (assessed surfaces, including clean ones)', '', ...(coverageLines.length ? coverageLines : ['_No coverage entries._']))
+        if (ruledOutCount > 0) {
+          out.push('', `_Triage note: ${ruledOutCount} surface(s) ruled out (no attacker-reachable attack surface) — see ruled_out rows above._`)
+        }
         out.push('', '## Methodology', '', 'Reconnaissance/mapping first, automated scanning with multiple engines, targeted validation with concrete PoCs, counterevidence passes, evidence-bound severity scoring (StriX-DH, adapted from the Strix methodology).')
 
         const reportPath = join(workspaceDir(config), 'report.md')

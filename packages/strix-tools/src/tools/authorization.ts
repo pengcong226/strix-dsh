@@ -27,6 +27,19 @@ export interface PreApprovedPost {
   body: string
 }
 
+export interface TestAccount {
+  /** Label for this account, e.g. "student-test-1". Shown unmasked. */
+  label: string
+  /** Login username. Shown unmasked. */
+  username: string
+  /** Password or secret. NEVER rendered unmasked — get returns it for the model's own login use; prompt sections and reports mask it. */
+  password?: string
+  /** Login entry URL, when known. Shown unmasked. */
+  login_url?: string
+  /** Free-form notes, e.g. role or expiry. Shown unmasked. */
+  notes?: string
+}
+
 export interface Authorization {
   /** What is in scope: URLs, hosts, IP ranges, or code paths. */
   targets: string[]
@@ -45,6 +58,13 @@ export interface Authorization {
    * probes) proceed WITHOUT asking. Empty/missing = no POST pre-approval.
    */
   pre_approved_post_paths?: PreApprovedPost[]
+  /**
+   * Operator-issued test accounts (Strix autonomy enabler): stored in the
+   * workspace file so the model can self-serve logins without asking. LOCAL
+   * SECRET — never commit, never paste into reports or chat; prompt sections
+   * and report summaries render usernames masked-password only.
+   */
+  test_accounts?: TestAccount[]
   recorded_at: string
   updated_at?: string
 }
@@ -95,6 +115,19 @@ export function isAuthorizationExpired(auth: Authorization, nowMs?: number): boo
 }
 
 /**
+ * Masked one-liner per test account for prompt sections and reports: label +
+ * username + login URL travel in the clear (the model needs them to find the
+ * login); the password NEVER does. Pure — unit-tested.
+ */
+export function maskTestAccount(a: TestAccount): string {
+  const parts = [`${a.label} / ${a.username}`]
+  if (a.login_url) parts.push(a.login_url)
+  parts.push(a.password ? 'password: ***' : 'password: (not stored — ask the operator)')
+  if (a.notes) parts.push(a.notes)
+  return parts.join(' — ')
+}
+
+/**
  * Render the "short factual version" injected into the system prompt on
  * every turn. Three states:
  *
@@ -135,6 +168,11 @@ export function renderAuthorizationSection(config: ConfigType, nowMs?: number): 
   const preApproved = auth.pre_approved_post_paths ?? []
   if (preApproved.length > 0) {
     lines.push(`- Pre-approved POST paths (${preApproved.length}): ${preApproved.map((e) => `${e.path} [${e.body}]`).join('; ')}`)
+  }
+  const accounts = auth.test_accounts ?? []
+  if (accounts.length > 0) {
+    lines.push(`- Test accounts (${accounts.length}, passwords masked): ${accounts.map(maskTestAccount).join(' | ')}`)
+    lines.push('  Fetch full credentials with strix_authorization action=get when you are ready to log in — never paste passwords into notes, findings, or reports.')
   }
   if (isAuthorizationExpired(auth, nowMs)) {
     lines.push(
@@ -184,6 +222,11 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
           items: { type: 'object', additionalProperties: true },
           description: 'set: [{path, body}] exact POST allowlist, e.g. [{path:"/oas/forgetPassword", body:"username-existence-probe"}].',
         },
+        test_accounts: {
+          type: 'array',
+          items: { type: 'object', additionalProperties: true },
+          description: 'set: [{label, username, password?, login_url?, notes?}] operator-issued test accounts stored as workspace-local secrets for self-serve login.',
+        },
       },
       output: {
         schema: { type: 'string' },
@@ -198,6 +241,7 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
           valid_until?: string
           notes?: string
           pre_approved_post_paths?: Array<{ path?: string; body?: string }>
+          test_accounts?: Array<{ label?: string; username?: string; password?: string; login_url?: string; notes?: string }>
         }
         const path = authorizationPath(config)
 
@@ -216,6 +260,17 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
               .filter((e) => e && typeof e.path === 'string' && typeof e.body === 'string')
               .map((e) => ({ path: e.path as string, body: e.body as string }))
             : prev?.pre_approved_post_paths
+          const accounts = Array.isArray(args.test_accounts)
+            ? args.test_accounts
+              .filter((e) => e && typeof e.label === 'string' && typeof e.username === 'string')
+              .map((e) => ({
+                label: e.label as string,
+                username: e.username as string,
+                ...(typeof e.password === 'string' && e.password ? { password: e.password } : {}),
+                ...(typeof e.login_url === 'string' && e.login_url ? { login_url: e.login_url } : {}),
+                ...(typeof e.notes === 'string' && e.notes ? { notes: e.notes } : {}),
+              }))
+            : prev?.test_accounts
           const auth: Authorization = {
             targets: args.targets.map(String),
             granted_by: String(args.granted_by),
@@ -223,6 +278,7 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
             valid_until: args.valid_until ? String(args.valid_until) : undefined,
             notes: args.notes ? String(args.notes) : undefined,
             ...(preApproved?.length ? { pre_approved_post_paths: preApproved } : {}),
+            ...(accounts?.length ? { test_accounts: accounts } : {}),
             recorded_at: prev?.recorded_at ?? new Date().toISOString(),
             updated_at: prev ? new Date().toISOString() : undefined,
           }
@@ -230,7 +286,10 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
           const preNote = auth.pre_approved_post_paths?.length
             ? ` Plus ${auth.pre_approved_post_paths.length} pre-approved POST path(s) — matching strix_http POSTs proceed without asking.`
             : ''
-          return `Authorization recorded: ${auth.targets.length} target(s), granted by ${auth.granted_by}. Re-injected into the system prompt from now on.${preNote}`
+          const acctNote = auth.test_accounts?.length
+            ? ` Plus ${auth.test_accounts.length} test account(s) stored as workspace-local secrets — fetch with action=get when logging in, never paste passwords elsewhere.`
+            : ''
+          return `Authorization recorded: ${auth.targets.length} target(s), granted by ${auth.granted_by}. Re-injected into the system prompt from now on.${preNote}${acctNote}`
         }
 
         if (args.action === 'clear') {

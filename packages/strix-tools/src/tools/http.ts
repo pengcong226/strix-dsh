@@ -5,10 +5,11 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
-import { safeWorkspacePath, truncate, workspaceSub } from '../lib/util.js'
-import { matchesPreApprovedPost, readAuthorization } from './authorization.js'
+import { safeWorkspacePath, truncate, workspaceDir, workspaceSub } from '../lib/util.js'
+import { isAuthorizationExpired, matchesPreApprovedPost, readAuthorization } from './authorization.js'
 
 interface HttpArgs {
   url?: string
@@ -59,6 +60,48 @@ export function parseRawRequest(raw: string): { url?: string; method: string; he
     url = `http://${host}${path.startsWith('/') ? path : `/${path}`}`
   }
   return { url, method, headers, body }
+}
+
+/**
+ * Per-path counter for non-preapproved POSTs sent under a live attestation
+ * (spray guard). Persisted in workspace/http-post-counts.json so concurrent
+ * agents share one budget. Pure filesystem helpers — unit-tested.
+ */
+const POST_COUNTS_FILE = 'http-post-counts.json'
+
+export function postCountsPath(config: ConfigType): string {
+  return join(workspaceDir(config), POST_COUNTS_FILE)
+}
+
+export function readPostCounts(config: ConfigType): Record<string, number> {
+  try {
+    if (!existsSync(postCountsPath(config))) return {}
+    const parsed: unknown = JSON.parse(readFileSync(postCountsPath(config), 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const out: Record<string, number> = {}
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[k] = Math.floor(v)
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Increment the counter for a path and persist. Returns the new count.
+ * Pure-ish (filesystem write) — unit-tested against scratch configs.
+ */
+export function bumpPostCount(config: ConfigType, path: string): number {
+  const counts = readPostCounts(config)
+  const next = (counts[path] ?? 0) + 1
+  counts[path] = next
+  try {
+    writeFileSync(postCountsPath(config), JSON.stringify(counts, null, 2), 'utf8')
+  } catch {
+    /* best-effort audit persistence: the send proceeds regardless */
+  }
+  return next
 }
 
 export interface SendHttpOptions {
@@ -185,16 +228,31 @@ export function registerHttp(ctx: Context, config: ConfigType) {
 
         const method = (parsed?.method ?? args.method ?? 'GET').toUpperCase()
         const body = parsed?.body ?? args.body ?? ''
-        // Pre-approved POST fast path (Strix autonomy enabler): when the
-        // operator cleared this exact path + body in authorization.json, the
-        // POST proceeds WITHOUT asking — the clearance line below is the
-        // audit trail. Non-matching POSTs behave exactly as before.
-        let preApprovedNote = ''
+        // POST policy (Strix autonomy enabler, three branches):
+        // (a) pre-approved path+body in authorization.json → send, stamp the
+        //     clearance line (audit trail).
+        // (b) non-preapproved but a LIVE (unexpired) attestation exists → send
+        //     WITHOUT asking, stamp an audit line with the per-path count, and
+        //     enforce httpPostCapPerPath as the spray guard (over-cap refuses
+        //     and points at needs_follow_up + pre-approval).
+        // (c) no attestation → behave exactly as before (send, no stamp).
+        let postNote = ''
         if (method === 'POST') {
           try {
             const urlObj = new URL(url)
-            if (matchesPreApprovedPost(readAuthorization(config), urlObj.pathname, body)) {
-              preApprovedNote = `\n[pre-approved POST ${urlObj.pathname} — operator clearance in authorization.json, proceeded without asking]`
+            const auth = readAuthorization(config)
+            if (matchesPreApprovedPost(auth, urlObj.pathname, body)) {
+              postNote = `\n[pre-approved POST ${urlObj.pathname} — operator clearance in authorization.json, proceeded without asking]`
+            } else if (auth && !isAuthorizationExpired(auth)) {
+              const cap = config.httpPostCapPerPath
+              const counts = readPostCounts(config)
+              const seen = counts[urlObj.pathname] ?? 0
+              if (cap > 0 && seen >= cap) {
+                return `REJECTED: per-path POST cap reached for ${urlObj.pathname} (${seen}/${cap} non-preapproved POSTs already sent under this attestation). `
+                  + `Record a needs_follow_up coverage entry naming this path and ask the operator to pre-approve it (authorization.json pre_approved_post_paths) or raise the cap — do not retry with reworded bodies.`
+              }
+              const n = bumpPostCount(config, urlObj.pathname)
+              postNote = `\n[non-preapproved POST ${urlObj.pathname} — live authorization (${auth.targets.join(', ')}), count ${n}/${cap > 0 ? cap : '∞'}, proceeded without asking]`
             }
           } catch {
             /* unparsable URL: no pre-approval match, proceed normally */
@@ -208,15 +266,15 @@ export function registerHttp(ctx: Context, config: ConfigType) {
           followRedirects: args.follow_redirects,
           timeoutMs: args.timeout_ms,
         })
-        if (!args.save_to || !sent.ok) return `${sent.text}${preApprovedNote}`
+        if (!args.save_to || !sent.ok) return `${sent.text}${postNote}`
         const dir = workspaceSub(config, 'responses')
         const target = safeWorkspacePath(dir, args.save_to)
-        if (!target) return `${sent.text}${preApprovedNote}\nREJECTED: save_to must be a relative path inside workspace/responses/ (no .., no absolute paths).`
+        if (!target) return `${sent.text}${postNote}\nREJECTED: save_to must be a relative path inside workspace/responses/ (no .., no absolute paths).`
         const { dirname } = await import('node:path')
         const { mkdirSync } = await import('node:fs')
         mkdirSync(dirname(target), { recursive: true })
         writeFileSync(target, sent.rawBody, 'utf8')
-        return `${sent.text}${preApprovedNote}\n[full body saved to ${target}]`
+        return `${sent.text}${postNote}\n[full body saved to ${target}]`
       },
     }),
   )

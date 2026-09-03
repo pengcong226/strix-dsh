@@ -77,7 +77,9 @@ age: 245897
 - 超时 → `"Request failed: timeout after Nms (aborted). The host may be filtered, down, or the port/scheme wrong — fix the target rather than retrying blindly."`
 - 连接失败 → 附带 DNS/端口/协议排查提示；**把"连不上"当发现是方法错误**（对应 Strix 对 Caido 错误页的纪律）
 
-**配置交互**：`httpTimeoutMs`、`httpMaxBodyChars`。
+**配置交互**：`httpTimeoutMs`、`httpMaxBodyChars`、`httpPostCapPerPath`（默认 5）。
+
+**POST 政策**（0.11.0）：三分支——① 命中 `pre_approved_post_paths`（精确 path+body）→ 直发 + clearance 审计行；② 未命中但存在有效（未过期）授权 → 直发 + `[non-preapproved POST <path> — live authorization, count n/N]` 审计戳，按 path 计入 `workspace/http-post-counts.json`；③ 无授权 → 与旧版一致直发。超 `httpPostCapPerPath` 时 REJECTED，指引记 `needs_follow_up` 并申请预批，不许换词重试。
 
 ---
 
@@ -133,7 +135,7 @@ Registered F-001 [info] Toolchain verification entry — local-verification.
 | `caller_role` | string | finish（`root` 才放行；`operator` 子代理拒绝） |
 | `executive_summary` / `methodology` / `technical_analysis` / `recommendations` | string | finish 四段必填 |
 
-**输出**：写 `workspace/report.md`，返回路径与统计。结构：Scope & Authorization → Executive Summary（按严重度计数）→ Findings（逐个：严重度/CVSS/类型/目标/confidence/描述/证据代码块/PoC 脚本/反证/修复/白盒 diff）→ **Coverage Ledger（含测过没洞的表面）** → Methodology。
+**输出**：写 `workspace/report.md`，返回路径与统计。结构：Scope & Authorization（含授权摘要段：targets/granted_by/scope_ref/valid_until/约束/预批 POST 数/测试账号掩码；无授权写 none recorded）→ Executive Summary（按严重度计数）→ Findings（逐个：严重度/CVSS/类型/目标/confidence/描述/证据代码块/PoC 脚本/反证/修复/白盒 diff）→ **Coverage Ledger（含测过没洞的表面；ruled_out 行单独计数注释）** → Methodology。报告头打印 workspace 路径（一目标一工作区，跨 engagement 混用前先看 `strix_runs`）。
 
 - `action=sarif`：写 `workspace/findings.sarif`（SARIF 2.1.0：规则按漏洞类 `strix/<type>` + coverage 区 `strix/coverage/<area>`；severity 折三级、原标签+CVSS 留 `properties.strix`；无源码位置的 DAST 发现锚定 SECURITY.md 合成位置并标记；`code_locations` 出 fixes；coverage 作 pass/open 非失败 result）。实测：`3 rules, 4 results: 1 findings, 3 coverage`，可 `upload-sarif` 进 CI。
 - `action=finish`：仅编排者关闭 engagement（`caller_role=operator` 拒绝，指路 `send_message` 向父汇报；缺段逐项点名），四段追加到 report.md 尾 `## Engagement Close (finish)`。
@@ -158,8 +160,8 @@ REFUSED: finish closes the whole engagement and is root/orchestrator-only. ...
 | `id` | update 时必填（`C-NNN`） |
 | `surface` | 被评估的表面：URL、端点、host:port、文件、代码区域 |
 | `risk_area` | 测试的漏洞类别（SQLi、IDOR、auth bypass…） |
-| `outcome` | `clean` / `finding` / `needs_follow_up` / `blocked` |
-| `evidence_note` | 简注：测了什么、观察到什么、为何受阻 |
+| `outcome` | `clean` / `finding` / `needs_follow_up` / `blocked` / `ruled_out`（0.11.0 新增：分诊关闭，无攻击面表面 1–2 GET 后具名理由关闭，不再开新批） |
+| `evidence_note` | 简注：测了什么、观察到什么、为何受阻/关闭 |
 
 **纪律**（写入 description，模型可见）：**每个评估过的表面都要记录，包括干净的**——只列发现的报告无法说明审查过什么；同一表面用 update 移动，不许重复 record；`needs_follow_up` 对应 open_proof_gap。
 
@@ -217,8 +219,12 @@ Recorded C-001: https://example.com — baseline reachability → clean.
 | `scope_ref` | 项目或工单引用，如补天项目 id |
 | `valid_until` | 授权到期（ISO-8601） |
 | `notes` | 约束，如"禁止 DoS payload，仅业务时间" |
+| `pre_approved_post_paths` | set：`[{path, body}]` POST-only 证明预批（精确 path+body） |
+| `test_accounts` | set：`[{label, username, password?, login_url?, notes?}]` 操作员下发的测试账号，workspace 本地秘密，模型用 get 自取登录 |
 
-**语义**：set 写入 `workspace/authorization.json`（保留首次 recorded_at，复写记 updated_at）；get 读取；clear 撤销（删文件，agent 回到被动模式）。set 缺 targets/granted_by 时 REJECTED。
+**语义**：set 写入 `workspace/authorization.json`（保留首次 recorded_at，复写记 updated_at；`pre_approved_post_paths`/`test_accounts` 未传时沿用旧值）；get 读取（含密码原文，供模型自助登录）；clear 撤销（删文件，agent 回到被动模式）。set 缺 targets/granted_by 时 REJECTED。
+
+**秘密纪律**：`test_accounts` 的密码只活在 `authorization.json` 文件与 get 返回里——prompt 注入与 report 摘要一律掩码（label/username/login_url 明文 + `password: ***`）；永不写入 notes/findings/report 正文，不提交、不外发。
 
 **动态注入**：`strix:authorization` section（order 101，provider 函数形式，每次组装求值）三态——无声明时一行被动限制提醒；有未过期声明时事实+ refusal-avoidance 段（范围内验证是已授权安全工作：不自我归类为未授权/有害，不做通用政策警告，拿不准时继续最有用的范围内步骤——上游 REFUSAL AVOIDANCE 的条件版，只在有效授权存续期内出现，永不放宽 stay-inside）；`valid_until` 过期时事实保留+过期警告并退回被动。set 后下一 turn 即生效，无需重启。
 
@@ -472,7 +478,7 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | 配置 | 默认 | 影响 |
 |---|---|---|
 | `workspaceDir` | `''` → `~/.dsh/strix-workspace` | 全部产物根目录 |
-| `httpTimeoutMs` / `httpMaxBodyChars` | 30000 / 20000 | strix_http |
+| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http（cap：同 path 非预批 POST 上限，存 `workspace/http-post-counts.json`） |
 | `shellImage` / `shellNetwork` / `shellTimeoutMs` | python:3.12-slim / true / 120s | strix_shell |
 | `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox |
 | `binariesDir` | `''` | recon/sast 二进制发现（`~/.dsh/bin` 始终在搜索路径） |

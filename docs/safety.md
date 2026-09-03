@@ -13,6 +13,7 @@ StriX-DH is an offensive-security tool suite. The tools are real: `strix_http` s
 - `strix_coverage` forces you to record what you tested and what you left open, so engagement scope is auditable after the fact.
 - **Execution tools require human approval per call.** `strix_shell` and `strix_pybox` route every command/script through dsh's ApprovalService before anything runs; only an explicit operator grant executes, and every decision + run outcome lands in `<workspace>/evidence/log.jsonl` (fail-closed: `rejected`/`cancelled`/`unavailable` all deny). Autonomous mode is opt-in via the `approvalGate: 'off'` config — the operator owns that decision.
 - Nothing in the suite "phones home": scan outputs, findings, and reports live only in your workspace directory.
+- Test-account passwords in `authorization.json` are workspace-local secrets: never commit the workspace, never paste passwords into notes/findings/reports/chat — prompt injection and report summaries render them masked (`password: ***`).
 
 ## Platform authorization for bug-bounty work
 

@@ -77,7 +77,7 @@ age: 245897
 - Timeout → `"Request failed: timeout after Nms (aborted). The host may be filtered, down, or the port/scheme wrong — fix the target rather than retrying blindly."`
 - Connection failure → ships DNS/port/protocol troubleshooting hints; **treating "unreachable" as a finding is a methodology error** (mirrors the Strix discipline on Caido error pages)
 
-**Config interactions**: `httpTimeoutMs`, `httpMaxBodyChars`.
+**Config interactions**: `httpTimeoutMs`, `httpMaxBodyChars`, `httpPostCapPerPath` (default 5). **POST policy** (0.11.0, three branches): pre-approved path+body → send + clearance line; live attestation but non-preapproved → send + audit stamp with per-path count in `workspace/http-post-counts.json`; no attestation → legacy behavior. Over-cap POSTs are REJECTED with a needs_follow_up pointer.
 
 ---
 
@@ -133,7 +133,7 @@ Registered F-001 [info] Toolchain verification entry — local-verification.
 | `caller_role` | string | finish (`root` passes; an `operator` child is refused) |
 | `executive_summary` / `methodology` / `technical_analysis` / `recommendations` | string | finish, all four required |
 
-**Output**: writes `workspace/report.md`, returns path + stats. Structure: Scope & Authorization → Executive Summary (counts by severity) → Findings (each: severity/CVSS/type/target/confidence/description/evidence code block/PoC script/counterevidence/remediation/white-box diff) → **Coverage Ledger (including reviewed-clean surfaces)** → Methodology.
+**Output**: writes `workspace/report.md`, returns path + stats. Structure: Scope & Authorization (incl. authorization summary: targets/grant facts/pre-approved POST count/masked test accounts; header prints the workspace path — one target set, one workspace) → Executive Summary (counts by severity) → Findings (each: severity/CVSS/type/target/confidence/description/evidence code block/PoC script/counterevidence/remediation/white-box diff) → **Coverage Ledger (including reviewed-clean surfaces)** → Methodology.
 
 - `action=sarif`: writes `workspace/findings.sarif` (SARIF 2.1.0: rules keyed `strix/<type>` + coverage zones `strix/coverage/<area>`; severities collapse to three levels with raw label + CVSS kept in `properties.strix`; sourceless DAST findings anchor on a flagged synthetic SECURITY.md location; `code_locations` become fixes; coverage rides as pass/open non-failing results). Verified live: `3 rules, 4 results: 1 findings, 3 coverage`, ready for `upload-sarif` into CI.
 - `action=finish`: orchestrator-only engagement close (`caller_role=operator` is refused with a pointer to `send_message`; missing sections are named one by one), appending `## Engagement Close (finish)` with the four sections to report.md.
@@ -158,7 +158,7 @@ REFUSED: finish closes the whole engagement and is root/orchestrator-only. ...
 | `id` | required for update (`C-NNN`) |
 | `surface` | The assessed surface: URL, endpoint, host:port, file, code area |
 | `risk_area` | Vulnerability class tested (SQLi, IDOR, auth bypass…) |
-| `outcome` | `clean` / `finding` / `needs_follow_up` / `blocked` |
+| `outcome` | `clean` / `finding` / `needs_follow_up` / `blocked` / `ruled_out` (0.11.0: triage closure — no-attack-surface pages close after 1–2 GETs with a named reason) |
 | `evidence_note` | Short note: what was tested, what was observed, why blocked |
 
 **Discipline** (baked into the description, model-visible): **record every assessed surface, including clean ones** — a report listing only findings cannot say what was reviewed and cleared; move one surface with update, never double-record; `needs_follow_up` maps to open_proof_gap.
@@ -216,9 +216,13 @@ Recorded C-001: https://example.com — baseline reachability → clean.
 | `granted_by` | Granting person/team/program (required for set) |
 | `scope_ref` | Program or ticket reference, e.g. a Butian program id |
 | `valid_until` | Permission expiry (ISO-8601) |
+| `pre_approved_post_paths` | set: [{path, body}] pre-approved POST-only proofs (exact path+body) |
+| `test_accounts` | set: [{label, username, password?, login_url?, notes?}] operator-issued test accounts, workspace-local secrets, self-served via get |
 | `notes` | Constraints, e.g. "no DoS payloads, business hours only" |
 
 **Semantics**: set writes `workspace/authorization.json` (first recorded_at preserved, overwrites stamped updated_at); get reads; clear revokes (deletes the file, agent returns to passive-only). set without targets/granted_by is REJECTED.
+
+**Secret discipline**: test-account passwords live only in `authorization.json` and get results — prompt injection and report summaries are masked (label/username/login_url in clear + `password: ***`); never written into notes/findings/report bodies, never committed, never pasted out.
 
 **Dynamic injection**: the `strix:authorization` section (order 101, provider-function form, re-evaluated on every assembly) renders three states — no attestation: a one-line passive-only reminder; live attestation: facts plus the refusal-avoidance passage (in-scope validation is authorized security work: no self-classifying it as unauthorized/harmful, no generic policy warnings, continue with the most useful in-scope step when in doubt — upstream REFUSAL AVOIDANCE in conditional form, present only while a live attestation covers the work, never widening stay-inside); expired `valid_until`: facts kept plus an expiry warning with fallback to passive-only. Effective on the very next turn after set, no restart needed.
 
@@ -472,7 +476,7 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | Config | Default | Affects |
 |---|---|---|
 | `workspaceDir` | `''` → `~/.dsh/strix-workspace` | All artifact roots |
-| `httpTimeoutMs` / `httpMaxBodyChars` | 30000 / 20000 | strix_http |
+| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http (cap: per-path non-preapproved POST limit) |
 | `shellImage` / `shellNetwork` / `shellTimeoutMs` | python:3.12-slim / true / 120s | strix_shell |
 | `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox |
 | `binariesDir` | `''` | recon/sast binary discovery (`~/.dsh/bin` is always searched) |

@@ -61,6 +61,8 @@
       Tested / Findings (filed F-NNN ids or "none — area clean" only with full coverage + zero open_items)
       / Open items (each with the SPECIFIC gap + exact missing input) / Recommendations for the parent.
       NEVER end with "you decide" — a blocked item never stops the next-best pre-approved step.
+      Blocked entries name the control (WAF RST / 403 page / anti-headless / DNS) plus the second path
+      tried or available; triage closures use ruled_out with the reason, never a bare clean.
 
       ONLY test targets you own or have explicit, written permission to test. See docs/safety.md.
 
