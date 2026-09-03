@@ -11,6 +11,7 @@ import type { ConfigType } from '../src/config.js'
 import { safeId, safeWorkspacePath, truncate } from '../src/lib/util.js'
 import { checkExtraArgs } from '../src/tools/sast.js'
 import { matchesAutoAllow } from '../src/lib/approval.js'
+import { methodologySection } from '../src/index.js'
 import { formatDepFinding, parseOsvVuln, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest } from '../src/tools/http.js'
 import { SEVERITIES, VULN_TYPES, checkDuplicate, listFindings, missingFinishSections, validateFinding } from '../src/tools/finding.js'
@@ -357,6 +358,19 @@ describe('depcheck pure helpers', () => {
     expect(line).toContain('lodash@4.17.20')
     expect(line).toContain('KEV-HIT')
     expect(line).toContain('fixed=4.17.21')
+  })
+})
+
+describe('methodology autonomy discipline', () => {
+  it('keeps the Strix-derived no-question rule with dsh turn semantics', () => {
+    const text = methodologySection(scratchConfig())
+    expect(text).toContain('AUTONOMY')
+    expect(text).toContain('YOUR TURN ENDS THE MOMENT YOU REPLY WITH PLAIN TEXT')
+    expect(text).toContain('NEVER end a turn with a question')
+    expect(text).toContain('EVERY')
+    expect(text).toContain('tool call while work remains')
+    expect(text).toContain('(1) use issued test')
+    expect(text).toContain('strix_authorization, not via questions')
   })
 })
 

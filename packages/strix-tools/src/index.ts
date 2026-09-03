@@ -76,7 +76,8 @@ export async function apply(ctx: Context, config: ConfigType) {
   console.log(`[strix-dsh-tools] registered ${registrations.length} tool modules (16 tools) + methodology + authorization sections + ${skillCount} skills; workspace: ${workspaceDir(config)}`)
 }
 
-function methodologySection(config: ConfigType): string {
+/** Exported for regression tests: the AUTONOMY discipline must survive refactors. */
+export function methodologySection(config: ConfigType): string {
   const ws = workspaceDir(config)
   return [
     '<strix_methodology>',
@@ -121,6 +122,20 @@ function methodologySection(config: ConfigType): string {
     '  low-severity ones.',
     '- Real engagements take many iterations. Never give up early; each failure',
     '  refines the next attempt.',
+    '- AUTONOMY (Strix AUTONOMOUS BEHAVIOR, adapted to dsh turn semantics): in',
+    '  dsh YOUR TURN ENDS THE MOMENT YOU REPLY WITH PLAIN TEXT — control returns',
+    '  to the user. So NEVER end a turn with a question or a "you decide" summary:',
+    '  that hands control over and stops the engagement. When several next steps',
+    '  are possible, pick the highest-value one yourself and CONTINUE WITH A TOOL',
+    '  CALL (recon, PoC, coverage record, finding, report update, subagent',
+    '  dispatch) — record the deferred options as needs_follow_up coverage, not',
+    '  as questions. Priority when parallel paths compete: (1) use issued test',
+    '  accounts/credentials already provided, (2) authorized low-rate validation',
+    '  already in scope, (3) new baseline coverage of untouched surfaces. EVERY',
+    '  turn must carry a tool call while work remains; a status summary is text',
+    '  BEFORE a tool call, never instead of one. The ONLY legitimate stops are',
+    '  missing/expired authorization or an unresolvable target — state those via',
+    '  strix_authorization, not via questions.',
     '',
     '- AUTHORIZATION: the operator records permission with strix_authorization',
     '  (action=set) and the strix:authorization prompt section carries it on',

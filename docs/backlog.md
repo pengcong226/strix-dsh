@@ -57,4 +57,11 @@
 
 > 使用中遇到的问题逐条记在这里，格式：现象 → 复现步骤 → 期望行为。我（AI）负责补方案与验收标准并执行。
 
-1. （待补充）
+### C-1. Agent 停下来问用户下一步怎么做 ✅（0.10.1 已修）
+
+- **现象**：无弹窗后，agent 改以纯文本"三选一，你定"收尾（如"测试账号 / 批单发低速 POST 枚举 / 再挑第四批，你定"），turn 结束、engagement 停滞。不符合 Strix 工作流。
+- **根因**（研读上游 `system_prompt.jinja` + `factory.py` 后定位）：Strix 的完全自动化靠三层——① turn 结束语义：纯文本**不结束** turn，只有 lifecycle 工具调用（`finish_scan`/`agent_finish`/`respond_to_user`）才能停，写"三选一"会被 nudge 推着继续；② AUTONOMOUS BEHAVIOR 明令 + 几乎每 turn 必带工具调用；③ `finish_scan` 四段 + closure 全覆盖的高交差门槛。而 dsh 语义相反：**纯文本回复即 turn 结束、控制权交回用户**。删 `tool-ask-user` 行只能去掉弹窗工具，拦不住纯文本提问——这是会话语义问题，不是人设问题。
+- **方案**（Strix 方案的 dsh 等价翻译）：方法论 + 三 persona（orchestrator/operator/分派行）统一注入 AUTONOMY 纪律——turn 以纯文本提问/总结收尾=交权停机，所以永远以工具调用收尾；多选项并存时按优先级自主推进（①已发测试账号 → ②范围内低速验证 → ③新基线），被搁置项记 `needs_follow_up` coverage 而非提问；合法停机仅两种（授权缺失/过期、目标不可达，经 `strix_authorization` 声明）。
+- **验收**：`methodologySection` 回归单测（关键句存活）；preset 双 healthy；headless 抽查调工具+给下一步（注：headless 单次调用形态天然以回复收尾，真考场是 WebUI 多轮；一次抽查中模型在假设性三选项里选了 B 而非 A——因 A 的前置"已发账号"在 workspace 中并不存在，选择合理）。
+- **未竟**：WebUI 长会话实测"连续 N 轮无提问"仍待用户侧观察反馈。
+- **真实证据补记（headless 后台任务，真实工作区 51 coverage/18 notes）**：模型面对"测试账号 / 低速 POST / 新基线"三选项，零提问，按优先级推理后自主选 C——A 因 N-001~N-018 无已发账号而不可用，B 被威胁模型约束禁止，C 可做；随后连续工具调用（`strix_threat_model get` + `notes list` + `coverage list` → `strix_recon jxnu.edu.cn` 192 子域 → http 基线 11 面 → `notes create N-019` + `amend` + `strix_report` 62 coverage），以 report 工具收尾而非"你定"。Strix 式自主推进在 dsh 下成立。

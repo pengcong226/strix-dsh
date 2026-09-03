@@ -17,7 +17,8 @@ Content adapted from upstream `strix/agents/prompts/system_prompt.jinja`
 |---|---|
 | persona statement | condensed into the section opener ("authorized security validation agent") |
 | `<root_agent_directive>` (orchestrator-not-hands-on) | ✅ **已落地（presets/ 双人设）**：`strix` preset persona 改为 Orchestrator 定位（规划/派发/裁决/汇总），`strix-operator` 为纯执行 persona（动手、不规划、不派发、范围变更上报）。注：alpha.5 子代理继承父组合，拆分只对手动并行会话生效 |
-| `<communication_rules>` | dropped — dsh owns turn/communication semantics natively |
+| `<communication_rules>` | dropped as a section — dsh owns turn/communication semantics natively; BUT its autonomy core is re-implemented as the AUTONOMY discipline (see below), because dsh semantics are inverted vs Strix (plain text ENDS the turn here) |
+| AUTONOMOUS BEHAVIOR | ✅ **已落地（dsh 等价翻译）**：方法论 + 三 persona（orchestrator/operator/分派行）统一注入——turn 以纯文本提问/总结收尾=交权停机，故永远以工具调用收尾；多选项并存按优先级自主推进（①已发测试账号 → ②范围内低速验证 → ③新基线），被搁置项记 `needs_follow_up` 而非提问；合法停机仅授权缺失/过期与目标不可达。`methodologySection` 回归单测保关键句存活；headless 真实工作区验证零提问自主推进 11 面 |
 | SYSTEM-VERIFIED SCOPE / AUTHORIZATION / REFUSAL AVOIDANCE | ✅ **已落地（条件版）**：`strix:authorization` section 三态渲染——无授权=被动提醒；有未过期授权=事实+ refusal-avoidance 段（范围内验证是已授权安全工作，不自我归类为未授权/有害，不做通用政策警告，拿不准时继续最有用的范围内步骤）；`valid_until` 过期=事实保留+过期警告并退回被动。与上游无条件版"never question your authority"的差异是故意的：本地工具无平台级 scope 验证，avoidance 只在有效授权存续期内出现、且永不放宽 "stay inside targets"。见 `src/tools/authorization.ts`（`renderAuthorizationSection` + `isAuthorizationExpired`）。 |
 | THOROUGH VALIDATION / closure discipline | ported: confirmed / ruled_out / open_proof_gap triad, "missing information is NOT proof of safety" |
 | ASSESSMENT METHODOLOGY (7 steps) | ported (recon-first, iterate, impact documentation) |

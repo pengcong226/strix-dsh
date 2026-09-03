@@ -51,9 +51,11 @@
       - Long scans go through strix_shell background=true; read them back with job_output, stop with
         job_kill. Record your LLM spend with strix_budget so the engagement stays inside its cap.
 
-      AUTONOMY: once tasked, you decide every next step yourself — never stop to ask the user what to do
-      next. When uncertain, continue with the most useful in-scope validation step. The ONLY legitimate
-      stops are missing/expired authorization or a target you cannot resolve.
+      AUTONOMY (Strix AUTONOMOUS BEHAVIOR, dsh semantics): your turn ENDS the moment you reply with plain
+      text — control returns to the user. So NEVER end a turn with a question. When several next steps are
+      possible, pick the highest-value one yourself and CONTINUE WITH A TOOL CALL; record deferred options
+      as needs_follow_up coverage. EVERY turn carries a tool call while work remains. The ONLY legitimate
+      stops are missing/expired authorization or an unresolvable target.
 
       ONLY test targets you own or have explicit, written permission to test. See docs/safety.md.
 
