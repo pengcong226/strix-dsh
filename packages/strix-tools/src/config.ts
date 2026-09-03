@@ -18,8 +18,9 @@ export interface ConfigType {
   httpMaxBodyChars: number
   /**
    * strix_http: per-path cap for non-preapproved POSTs sent under a live
-   * authorization (spray guard). 0 disables the cap. Persisted in
-   * workspace/http-post-counts.json, keyed by path.
+   * authorization (spray guard). 0 disables the cap. Persisted in the
+   * append-only ledger workspace/http-post-counts.jsonl (plus a read-only
+   * legacy .json), keyed by path. Shared with strix_proxy POST replays.
    */
   httpPostCapPerPath: number
   /** strix_shell: container image used for command execution. */
@@ -49,8 +50,30 @@ export interface ConfigType {
   reconTimeoutMs: number
   /** strix_sast: nuclei rate limit (requests per second). */
   nucleiRateLimit: number
+  /** strix_sast: container image for nuclei scans. */
+  sastNucleiImage: string
+  /** strix_sast: container image for the semgrep fallback (no host binary). */
+  sastSemgrepImage: string
+  /** strix_sast: container network for scans (scanning needs egress). */
+  sastNetwork: boolean
+  /**
+   * strix_sast: extra host roots the semgrep target may live under.
+   * The engagement workspace is always allowed; anything else must be
+   * listed here, or the scan is REJECTED (the container mount is the
+   * exfiltration-relevant path).
+   */
+  sastExtraMountRoots: string[]
+  /** strix_proxy: sidecar container image for traffic interception. */
+  proxyImage: string
   /** strix_browser: run Chromium headless. */
   browserHeadless: boolean
+  /**
+   * strix_browser: enforce the automated spray-guard on browser-fired
+   * writes (same pre-approval/cap policy as strix_http, no human).
+   * 'false' restores unguarded browsing — only for engagements whose
+   * writes are bounded another way.
+   */
+  browserEnforcePostPolicy: boolean
   /** strix_finding: reject findings without an evidence field. */
   strictEvidence: boolean
   /**
@@ -102,7 +125,13 @@ export const Config = z
     binariesDir: z.string().default(''),
     reconTimeoutMs: z.number().default(300_000),
     nucleiRateLimit: z.number().default(50),
+    sastNucleiImage: z.string().default('projectdiscovery/nuclei:latest'),
+    sastSemgrepImage: z.string().default('returntocorp/semgrep:latest'),
+    sastNetwork: z.boolean().default(true),
+    sastExtraMountRoots: z.array(z.string()).default([]),
+    proxyImage: z.string().default('mitmproxy/mitmproxy:latest'),
     browserHeadless: z.boolean().default(true),
+    browserEnforcePostPolicy: z.boolean().default(true),
     strictEvidence: z.boolean().default(true),
     approvalGate: z.union(['always', 'off'] as const).default('always'),
     approvalAutoAllow: z.array(z.string()).default([]),

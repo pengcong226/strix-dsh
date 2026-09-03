@@ -70,8 +70,10 @@ export interface Authorization {
 }
 
 /**
- * Whether a POST request matches a pre-approved entry: same path and body
- * within the allowlisted contract. Pure — unit-tested.
+ * Whether a POST request matches a pre-approved entry: EXACT path and EXACT
+ * body (or '*' for any body). Substring matching is deliberately NOT used: a
+ * short allowlisted token would otherwise clear any body containing it.
+ * Pure — unit-tested.
  */
 export function matchesPreApprovedPost(
   auth: Authorization | null,
@@ -82,11 +84,31 @@ export function matchesPreApprovedPost(
   const entries = auth.pre_approved_post_paths ?? []
   for (const e of entries) {
     if (!e.path || !e.body) continue
-    if (e.path === path && (e.body === '*' || e.body === body || body.includes(e.body))) {
+    if (e.path === path && (e.body === '*' || e.body === body)) {
       return true
     }
   }
   return false
+}
+
+/**
+ * Is `target` (URL or domain) covered by a live attestation? Scope entries
+ * and the target are normalized (lowercased, scheme and trailing path
+ * stripped) and compared as substring in either direction, so a scope of
+ * `example.com` covers `https://sub.example.com/login`. Deliberately
+ * permissive: the attestation is operator-written and this is a backstop,
+ * not a scope oracle — the model discipline ("stay inside these targets")
+ * remains the primary control. Pure — unit-tested.
+ */
+export function targetCoveredByAuth(auth: Authorization | null, target: string): boolean {
+  if (!auth || isAuthorizationExpired(auth)) return false
+  const norm = (s: string) => s.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/[/\\?#].*$/, '')
+  const t = norm(target)
+  if (!t) return false
+  return (auth.targets ?? []).some((scope) => {
+    const s = norm(scope)
+    return !!s && (t.includes(s) || s.includes(t))
+  })
 }
 
 const FILE = 'authorization.json'
@@ -220,7 +242,7 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
         pre_approved_post_paths: {
           type: 'array',
           items: { type: 'object', additionalProperties: true },
-          description: 'set: [{path, body}] exact POST allowlist, e.g. [{path:"/oas/forgetPassword", body:"username-existence-probe"}].',
+          description: 'set: [{path, body}] exact allowlist for state-changing sends (POST/PUT/PATCH/DELETE), e.g. [{path:"/oas/forgetPassword", body:"username-existence-probe"}].',
         },
         test_accounts: {
           type: 'array',
@@ -255,14 +277,23 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
           if (!args.targets?.length) return 'REJECTED: targets (at least one) is required for set.'
           if (!args.granted_by?.trim()) return 'REJECTED: granted_by is required for set.'
           const prev = readAuthorization(config)
+          let dropped = 0
           const preApproved = Array.isArray(args.pre_approved_post_paths)
             ? args.pre_approved_post_paths
-              .filter((e) => e && typeof e.path === 'string' && typeof e.body === 'string')
+              .filter((e) => {
+                const ok = e && typeof e.path === 'string' && typeof e.body === 'string'
+                if (!ok) dropped += 1
+                return ok
+              })
               .map((e) => ({ path: e.path as string, body: e.body as string }))
             : prev?.pre_approved_post_paths
           const accounts = Array.isArray(args.test_accounts)
             ? args.test_accounts
-              .filter((e) => e && typeof e.label === 'string' && typeof e.username === 'string')
+              .filter((e) => {
+                const ok = e && typeof e.label === 'string' && typeof e.username === 'string'
+                if (!ok) dropped += 1
+                return ok
+              })
               .map((e) => ({
                 label: e.label as string,
                 username: e.username as string,
@@ -289,7 +320,7 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
           const acctNote = auth.test_accounts?.length
             ? ` Plus ${auth.test_accounts.length} test account(s) stored as workspace-local secrets — fetch with action=get when logging in, never paste passwords elsewhere.`
             : ''
-          return `Authorization recorded: ${auth.targets.length} target(s), granted by ${auth.granted_by}. Re-injected into the system prompt from now on.${preNote}${acctNote}`
+          return `Authorization recorded: ${auth.targets.length} target(s), granted by ${auth.granted_by}. Re-injected into the system prompt from now on.${preNote}${acctNote}${dropped > 0 ? ` Warning: ${dropped} malformed pre-approval/account entr(y/ies) were dropped (check field names: path+body, label+username).` : ''}`
         }
 
         if (args.action === 'clear') {
@@ -298,7 +329,7 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
           return 'Authorization attestation revoked. The agent is back to passive-only until a new one is recorded.'
         }
 
-        return `Unknown action "${args.action}". Use set | get | clear.`
+        return `REJECTED: unknown action "${args.action}". Use set | get | clear.`
       },
     }),
   )

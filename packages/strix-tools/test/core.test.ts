@@ -8,22 +8,27 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { ConfigType } from '../src/config.js'
-import { nextIdAmong, nextSequentialId, runProcess, safeId, safeWorkspacePath, truncate, writeExclusive } from '../src/lib/util.js'
+import { nextIdAmong, nextSequentialId, runProcess, clampTimeoutMs, safeId, safeWorkspacePath, truncate, writeExclusive, writeFileAtomic } from '../src/lib/util.js'
 import { registerBundledSkills } from '../src/skills-provider.js'
 import { registerNotes } from '../src/tools/notes.js'
-import { checkExtraArgs } from '../src/tools/sast.js'
-import { matchesAutoAllow } from '../src/lib/approval.js'
+import { checkExtraArgs, SEMGREP_BLOCKED_EXTRA_FLAGS, semgrepTargetAllowed } from '../src/tools/sast.js'
+import { matchesAutoAllow, splitApprovalSummary } from '../src/lib/approval.js'
 import { methodologySection } from '../src/index.js'
 import { formatDepFinding, parseOsvVuln, readKevCache, sortDepFindings } from '../src/tools/depcheck.js'
-import { parseRawRequest } from '../src/tools/http.js'
-import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, listFindings, missingFinishSections, registerFinding, registerReport, validateFinding } from '../src/tools/finding.js'
-import { OUTCOMES, readLedger, writeLedger } from '../src/tools/coverage.js'
-import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, renderAuthorizationSection } from '../src/tools/authorization.js'
+import { parseRawRequest, evaluatePostPolicy, STATE_CHANGING_METHODS } from '../src/tools/http.js'
+import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, listFindings, missingFinishSections, registerFinding, registerReport, validateFinding } from '../src/tools/finding.js'
+import { OUTCOMES, readLedger, registerCoverage, writeLedger } from '../src/tools/coverage.js'
+import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, registerAuthorization, renderAuthorizationSection, targetCoveredByAuth } from '../src/tools/authorization.js'
 import { bumpPostCount, postCountsPath, readPostCounts } from '../src/tools/http.js'
-import { budgetPath, checkBudget, formatUsd, priceUsage, readBudget } from '../src/tools/budget.js'
+import { budgetPath, checkBudget, formatUsd, priceUsage, readBudget, registerBudget } from '../src/tools/budget.js'
+import { strixDhVersion } from '../src/tools/sarif.js'
+import { validPipPackages } from '../src/tools/pybox.js'
 import { buildBackgroundDockerArgs, jobLabel } from '../src/lib/jobs.js'
+import { registerThreatModel } from '../src/tools/threat-model.js'
+import { createSprayGuardHandler, type GuardedRoute } from '../src/tools/browser.js'
 import { mirrorEvent } from '../src/lib/session-mirror.js'
-import { filterFlows, formatFlow, readFlows } from '../src/tools/proxy.js'
+import { filterFlows, formatFlow, pidOwnedByDockerCli, procCmdlineIsDockerCli, proxyImageKey, readFlows, tasklistRowIsDockerCli } from '../src/tools/proxy.js'
+import { buildHttpxArgs, isSafeDomain } from '../src/tools/recon.js'
 import {
   SARIF_FILENAME,
   buildSarifDocument,
@@ -54,7 +59,13 @@ function scratchConfig(): ConfigType {
     binariesDir: '',
     reconTimeoutMs: 1000,
     nucleiRateLimit: 50,
+    sastNucleiImage: 'projectdiscovery/nuclei:latest',
+    sastSemgrepImage: 'returntocorp/semgrep:latest',
+    sastNetwork: true,
+    sastExtraMountRoots: [],
+    proxyImage: 'mitmproxy/mitmproxy:latest',
     browserHeadless: true,
+    browserEnforcePostPolicy: true,
     strictEvidence: true,
     approvalGate: 'off',
     budgetLimitUsd: 0,
@@ -318,6 +329,26 @@ describe('sast extra_args guard', () => {
   it('matches case-insensitively', () => {
     expect(checkExtraArgs(['-RL'])).toMatch(/REJECTED/)
   })
+
+  it('normalizes =value and --long forms before matching', () => {
+    for (const flag of ['-rl=100', '--rate-limit=50', '-u=http://evil.test', '--target=x', '--config=y', '-c=5']) {
+      expect(checkExtraArgs([flag])).toMatch(/REJECTED/)
+    }
+  })
+
+  it('blocks attached short value forms', () => {
+    expect(checkExtraArgs(['-rl100'])).toMatch(/REJECTED/)
+    expect(checkExtraArgs(['-c5'])).toMatch(/REJECTED/)
+  })
+
+  it('uses a separate table for semgrep: -l/--lang allowed, remote/upload blocked', () => {
+    expect(checkExtraArgs(['-l', 'python'], SEMGREP_BLOCKED_EXTRA_FLAGS)).toBeNull()
+    expect(checkExtraArgs(['--lang', 'python'], SEMGREP_BLOCKED_EXTRA_FLAGS)).toBeNull()
+    expect(checkExtraArgs(['--include', '*.py'], SEMGREP_BLOCKED_EXTRA_FLAGS)).toBeNull()
+    for (const flag of ['--remote', '--metrics', '--upload', '--gitlab', '--config=p/auto']) {
+      expect(checkExtraArgs([flag], SEMGREP_BLOCKED_EXTRA_FLAGS)).toMatch(/REJECTED/)
+    }
+  })
 })
 
 describe('approval auto-allow', () => {
@@ -329,6 +360,26 @@ describe('approval auto-allow', () => {
   it('is empty-deny by default and skips invalid regexes', () => {
     expect(matchesAutoAllow([], 'anything')).toBe(false)
     expect(matchesAutoAllow(['([invalid'], '([invalid')).toBe(false)
+  })
+
+  it('matches patterns against the FULL text, never the display truncation', () => {
+    // A prefix pattern must not grant when the payload hides past the cut.
+    const evil = `strix_shell: run "echo hi${' '.repeat(900)}; rm -rf /" in img`
+    const { display, match } = splitApprovalSummary(evil, 400)
+    expect(match).toBe(evil)
+    expect(display.length).toBeLessThan(evil.length)
+    expect(display).toMatch(/sha256:[0-9a-f]{12}/)
+    expect(matchesAutoAllow(['^strix_shell: run "echo'], match)).toBe(true)
+    expect(matchesAutoAllow(['^strix_shell: run "echo'], display)).toBe(true)
+    // ...but a pattern anchored to the hidden suffix only matches full text.
+    expect(matchesAutoAllow(['rm -rf /'], match)).toBe(true)
+    expect(matchesAutoAllow(['rm -rf /'], display)).toBe(false)
+  })
+
+  it('passes short summaries through unsplit', () => {
+    const { display, match } = splitApprovalSummary('strix_shell: run "echo hi"')
+    expect(display).toBe('strix_shell: run "echo hi"')
+    expect(match).toBe('strix_shell: run "echo hi"')
   })
 })
 
@@ -512,6 +563,54 @@ describe('authorization attestation', () => {
     expect(matchesPreApprovedPost({ targets: [], granted_by: 'x', recorded_at: 't0' }, '/a', 'b')).toBe(false)
     const expired = { ...auth, valid_until: '2020-01-01T00:00:00.000Z' }
     expect(matchesPreApprovedPost(expired, '/oas/forgetPassword', 'username-existence-probe')).toBe(false)
+  })
+
+  it('requires an EXACT body match — substrings never clear', () => {
+    const auth = {
+      targets: ['https://example.com'],
+      granted_by: 'test',
+      recorded_at: 't0',
+      pre_approved_post_paths: [{ path: '/p', body: 'ok' }],
+    }
+    expect(matchesPreApprovedPost(auth, '/p', 'ok')).toBe(true)
+    expect(matchesPreApprovedPost(auth, '/p', 'ok + injected payload')).toBe(false)
+    expect(matchesPreApprovedPost(auth, '/p', '')).toBe(false)
+  })
+
+  it('checks target coverage against a live attestation', () => {    const auth = { targets: ['https://example.com'], granted_by: 'test', recorded_at: 't0' }
+    expect(targetCoveredByAuth(auth, 'https://example.com/login')).toBe(true)
+    expect(targetCoveredByAuth(auth, 'https://sub.example.com/x')).toBe(true)
+    expect(targetCoveredByAuth(auth, 'example.com')).toBe(true)
+    expect(targetCoveredByAuth(auth, 'https://other.test/')).toBe(false)
+    expect(targetCoveredByAuth(auth, '')).toBe(false)
+    expect(targetCoveredByAuth(null, 'https://example.com/')).toBe(false)
+    expect(targetCoveredByAuth({ ...auth, valid_until: '2020-01-01T00:00:00.000Z' }, 'https://example.com/')).toBe(false)
+  })
+
+  it('set keeps prior lists when omitted and reports dropped malformed entries', async () => {
+    const config = scratchConfig()
+    const captured: Record<string, { execute: (a: unknown, e: unknown) => Promise<string> }> = {}
+    registerAuthorization({ tools: { register: (t) => { captured[t.name] = t } } } as never, config)
+    const tool = captured.strix_authorization!
+    await tool.execute({
+      action: 'set', targets: ['https://example.com'], granted_by: 'op',
+      pre_approved_post_paths: [{ path: '/a', body: 'b' }],
+    }, {})
+    // Omitted lists are inherited; malformed entries are dropped AND counted.
+    const out = await tool.execute({
+      action: 'set', targets: ['https://example.com'], granted_by: 'op',
+      pre_approved_post_paths: [{ path: '/c' }, { path: '/d', body: 'e' }],
+      test_accounts: [{ label: 'x' }, { label: 's1', username: 'u1' }],
+    }, {}) as string
+    expect(out).toContain('2 malformed')
+    const stored = readAuthorization(config)!
+    expect(stored.pre_approved_post_paths).toEqual([{ path: '/d', body: 'e' }])
+    expect(stored.test_accounts).toEqual([{ label: 's1', username: 'u1' }])
+    // Omitted lists are inherited from the previous attestation.
+    await tool.execute({ action: 'set', targets: ['https://example.com'], granted_by: 'op' }, {})
+    const inherited = readAuthorization(config)!
+    expect(inherited.pre_approved_post_paths).toEqual([{ path: '/d', body: 'e' }])
+    expect(inherited.test_accounts).toEqual([{ label: 's1', username: 'u1' }])
   })
 
   it('renders pre-approved POST paths into the prompt section', () => {
@@ -722,6 +821,7 @@ describe('background shell producer', () => {
     image: 'python:3.12-slim',
     network: true,
     timeoutMs: 60000,
+    cidFile: '/tmp/strix-test.cid',
   }
 
   it('builds docker run argv with workspace mount and workdir', () => {
@@ -731,6 +831,10 @@ describe('background shell producer', () => {
     expect(args).toContain('/workspace')
     expect(args.slice(-3)).toEqual(['bash', '-c', 'echo hi'])
     expect(args).not.toContain('--network')
+    // The daemon-side container is bound via --cidfile so timeout/cancel
+    // can `rm -f` it (killing the CLI never stops the container).
+    expect(args).toContain('--cidfile')
+    expect(args[args.indexOf('--cidfile') + 1]).toBe('/tmp/strix-test.cid')
   })
 
   it('adds --network none and custom workdir when requested', () => {
@@ -822,6 +926,186 @@ describe('proxy flow queries', () => {
 
   it('formats one flow line with sizes', () => {
     expect(formatFlow(sample[0]!)).toBe('F-1 GET 200 http://example.com/ (req 100B / rsp 500B)')
+  })
+
+  it('accepts only a docker CLI pid for the stop path (tasklist CSV)', () => {
+    const csv = '"docker.exe","1234","Console","1","10,000 K"\r\n"node.exe","5678","Console","1","50,000 K"'
+    expect(tasklistRowIsDockerCli(csv, 1234)).toBe(true)
+    expect(tasklistRowIsDockerCli(csv, 5678)).toBe(false)
+    expect(tasklistRowIsDockerCli(csv, 9999)).toBe(false)
+    expect(tasklistRowIsDockerCli('"DOCKER.EXE","1234","Console","1","10,000 K"', 1234)).toBe(true)
+  })
+
+  it('accepts only a docker CLI cmdline (/proc)', () => {
+    expect(procCmdlineIsDockerCli('docker\0run\0--rm\0')).toBe(true)
+    expect(procCmdlineIsDockerCli('/usr/bin/docker\0run\0')).toBe(true)
+    expect(procCmdlineIsDockerCli('node\0dsh\0')).toBe(false)
+    expect(procCmdlineIsDockerCli('')).toBe(false)
+  })
+
+  it('pid ownership check fails closed on bad pids', async () => {
+    await expect(pidOwnedByDockerCli(-1)).resolves.toBe(false)
+    await expect(pidOwnedByDockerCli(0)).resolves.toBe(false)
+    await expect(pidOwnedByDockerCli(Number.NaN)).resolves.toBe(false)
+    // A pid that cannot exist on any host must never verify.
+    await expect(pidOwnedByDockerCli(2_147_483_647)).resolves.toBe(false)
+  })
+})
+
+describe('recon httpx argv', () => {
+  it('passes the subdomain list explicitly via -l (no stdin channel exists)', () => {
+    const argv = buildHttpxArgs('/ws/recon/example.com/subs.txt', '/ws/recon/example.com/live.txt')
+    expect(argv).toContain('-l')
+    expect(argv[argv.indexOf('-l') + 1]).toBe('/ws/recon/example.com/subs.txt')
+    expect(argv).toContain('/ws/recon/example.com/live.txt')
+  })
+
+  it('accepts plain domains and rejects traversal/ports/whitespace', () => {
+    expect(isSafeDomain('example.com')).toBe(true)
+    expect(isSafeDomain('sub.example.com')).toBe(true)
+    for (const bad of ['', '..', '../evil', 'a/b', 'a\\b', 'example.com:8080', 'exa mple.com', '-lead.com', 'trail-.com', '.lead.com', 'trail.com.', 'a'.repeat(254)]) {
+      expect(isSafeDomain(bad)).toBe(false)
+    }
+  })
+})
+
+describe('semgrep target confinement', () => {
+  it('allows the workspace and listed roots, rejects everything else', () => {
+    const config = scratchConfig()
+    const ws = config.workspaceDir
+    expect(semgrepTargetAllowed(config, join(ws, 'src'))).toBe(true)
+    expect(semgrepTargetAllowed(config, ws)).toBe(true)
+    expect(semgrepTargetAllowed(config, join(ws, '..', 'other'))).toBe(false)
+    expect(semgrepTargetAllowed(config, 'C:\\Windows')).toBe(false)
+    // Listed roots open exactly one more tree; the workspace itself stays open.
+    const sibling = join(ws, '..', 'sibling-root')
+    expect(semgrepTargetAllowed(config, sibling)).toBe(false)
+    const withRoot = { ...config, sastExtraMountRoots: [sibling] }
+    expect(semgrepTargetAllowed(withRoot, join(sibling, 'proj'))).toBe(true)
+    expect(semgrepTargetAllowed(withRoot, join(ws, 'elsewhere'))).toBe(true)
+  })
+})
+
+describe('shared POST policy', () => {
+  const authDoc = {
+    targets: ['https://example.com'],
+    granted_by: 'test',
+    recorded_at: 't0',
+    pre_approved_post_paths: [{ path: '/ok', body: 'ping' }],
+  }
+
+  it('clears pre-approved paths with a clearance note', () => {
+    const config = scratchConfig()
+    writeFileSync(authorizationPath(config), JSON.stringify(authDoc), 'utf8')
+    const verdict = evaluatePostPolicy(config, 'https://example.com/ok', 'ping')
+    expect(verdict.proceed).toBe(true)
+    if (verdict.proceed) expect(verdict.note).toContain('pre-approved POST /ok')
+  })
+
+  it('refuses over-cap paths and proceeds unattested without a note', () => {
+    const config = scratchConfig()
+    writeFileSync(authorizationPath(config), JSON.stringify(authDoc), 'utf8')
+    const capped = { ...config, httpPostCapPerPath: 1 }
+    const first = evaluatePostPolicy(capped, 'https://example.com/login', 'a=1')
+    expect(first.proceed).toBe(true)
+    const second = evaluatePostPolicy(capped, 'https://example.com/login', 'a=2')
+    expect(second.proceed).toBe(false)
+    if (!second.proceed) expect(second.rejection).toMatch(/REJECTED: per-path state-changing cap/)
+    const bare = evaluatePostPolicy(scratchConfig(), 'https://example.com/login', 'a=1')
+    expect(bare).toEqual({ proceed: true, note: '' })
+  })
+
+  it('guards PUT/PATCH/DELETE like POST, sharing one per-path budget', () => {
+    const config = scratchConfig()
+    writeFileSync(authorizationPath(config), JSON.stringify(authDoc), 'utf8')
+    // Pre-approval entries match exact path+body on any guarded verb.
+    const cleared = evaluatePostPolicy(config, 'https://example.com/ok', 'ping', 'PUT')
+    expect(cleared.proceed).toBe(true)
+    if (cleared.proceed) expect(cleared.note).toContain('pre-approved PUT /ok')
+    // ...while a PUT and a POST to the same path draw one shared budget.
+    const capped = { ...config, httpPostCapPerPath: 1 }
+    expect(evaluatePostPolicy(capped, 'https://example.com/item', 'x=1', 'PUT').proceed).toBe(true)
+    const over = evaluatePostPolicy(capped, 'https://example.com/item', 'x=2', 'DELETE')
+    expect(over.proceed).toBe(false)
+    // Reads stay uncounted.
+    expect(evaluatePostPolicy(capped, 'https://example.com/item', '', 'GET')).toEqual({ proceed: true, note: '' })
+    expect(STATE_CHANGING_METHODS).toEqual(['POST', 'PUT', 'PATCH', 'DELETE'])
+  })
+
+  it('derives the proxy image match key from config', () => {
+    expect(proxyImageKey(scratchConfig())).toBe('mitmproxy/mitmproxy')
+    expect(proxyImageKey({ ...scratchConfig(), proxyImage: 'custom/proxy:2.0' })).toBe('custom/proxy')
+  })
+})
+
+describe('browser spray-guard (automated, no human)', () => {
+  const fakeRoute = (
+    method: string,
+    url: string,
+    body: string | null,
+    calls: string[],
+    opts?: { throwOnUrl?: boolean },
+  ): GuardedRoute => ({
+    request: () => ({
+      method: () => method,
+      url: () => {
+        if (opts?.throwOnUrl) throw new Error('boom')
+        return url
+      },
+      postData: () => body,
+    }),
+    continue: async () => { calls.push('continue') },
+    abort: async () => { calls.push('abort') },
+  })
+  const authDoc = {
+    targets: ['https://example.com'],
+    granted_by: 'test',
+    recorded_at: 't0',
+    pre_approved_post_paths: [{ path: '/ok', body: 'ping' }],
+  }
+
+  it('lets reads through untouched (no ledger touch, no notes)', async () => {
+    const config = scratchConfig()
+    const notes: string[] = []
+    const calls: string[] = []
+    await createSprayGuardHandler(config, notes)(fakeRoute('GET', 'https://example.com/', null, calls))
+    expect(calls).toEqual(['continue'])
+    expect(notes).toHaveLength(0)
+  })
+
+  it('clears pre-approved writes with an audit note and counts the rest', async () => {
+    const config = scratchConfig()
+    writeFileSync(authorizationPath(config), JSON.stringify(authDoc), 'utf8')
+    const notes: string[] = []
+    const calls: string[] = []
+    const handle = createSprayGuardHandler(config, notes)
+    await handle(fakeRoute('POST', 'https://example.com/ok', 'ping', calls))
+    await handle(fakeRoute('POST', 'https://example.com/form', 'a=1', calls))
+    expect(calls).toEqual(['continue', 'continue'])
+    expect(notes.join('\n')).toContain('pre-approved POST /ok')
+    expect(notes.join('\n')).toContain('non-preapproved POST /form')
+  })
+
+  it('aborts over-cap writes before they leave', async () => {
+    const config = scratchConfig()
+    writeFileSync(authorizationPath(config), JSON.stringify(authDoc), 'utf8')
+    const capped = { ...config, httpPostCapPerPath: 1 }
+    const notes: string[] = []
+    const calls: string[] = []
+    const handle = createSprayGuardHandler(capped, notes)
+    await handle(fakeRoute('POST', 'https://example.com/form', 'a=1', calls))
+    await handle(fakeRoute('POST', 'https://example.com/form', 'a=2', calls))
+    expect(calls).toEqual(['continue', 'abort'])
+    expect(notes.join('\n')).toMatch(/REJECTED: per-path state-changing cap/)
+  })
+
+  it('blocks fail-closed when the guard itself errors', async () => {
+    const config = scratchConfig()
+    const notes: string[] = []
+    const calls: string[] = []
+    await createSprayGuardHandler(config, notes)(fakeRoute('POST', 'https://example.com/x', '', calls, { throwOnUrl: true }))
+    expect(calls).toEqual(['abort'])
+    expect(notes.join('\n')).toMatch(/fail-closed/)
   })
 })
 
@@ -947,8 +1231,7 @@ describe('id allocation (regression: archived/deleted entries must not collide)'
     expect(JSON.parse(readFileSync(file, 'utf8')).id).toBe('first')
   })
 
-  it('strix_notes reuses no live id after a delete', async () => {
-    const config = scratchConfig()
+  it('strix_notes reuses no live id after a delete', async () => {    const config = scratchConfig()
     const captured: Record<string, { execute: (a: unknown, e: unknown) => Promise<string> }> = {}
     registerNotes({ tools: { register: (t) => { captured[t.name] = t } } } as never, config)
     const notes = captured.strix_notes!
@@ -961,6 +1244,19 @@ describe('id allocation (regression: archived/deleted entries must not collide)'
     const list = await notes.execute({ action: 'list' }, {})
     expect(list).toContain('N-004')
     expect(list).not.toContain('N-002')
+  })
+
+  it('strix_notes rejects bad ids, missing notes, and blank fields', async () => {
+    const config = scratchConfig()
+    const captured: Record<string, { execute: (a: unknown, e: unknown) => Promise<string> }> = {}
+    registerNotes({ tools: { register: (t) => { captured[t.name] = t } } } as never, config)
+    const notes = captured.strix_notes!
+    await expect(notes.execute({ action: 'get', id: '../../evil' }, {})).resolves.toMatch(/REJECTED/)
+    await expect(notes.execute({ action: 'get', id: 'N-404' }, {})).resolves.toContain('not found')
+    await expect(notes.execute({ action: 'update', id: 'N-404', body: 'x' }, {})).resolves.toContain('not found')
+    await expect(notes.execute({ action: 'delete', id: 'N-404' }, {})).resolves.toContain('not found')
+    await expect(notes.execute({ action: 'create', title: '   ', body: 'x' }, {})).resolves.toMatch(/REJECTED/)
+    await expect(notes.execute({ action: 'create', title: 't' }, {})).resolves.toMatch(/REJECTED/)
   })
 })
 
@@ -1005,6 +1301,11 @@ describe('create validation (strict evidence, trimmed)', () => {
   it('rejects out-of-list enums', () => {
     expect(validateFinding({ evidence: 'x', severity: 'SortaCritical' }, false)).toMatch(/severity/)
     expect(validateFinding({ evidence: 'x', vulnerability_type: 'skynet' }, false)).toMatch(/vulnerability_type/)
+  })
+
+  it('rejects out-of-list confidence', () => {
+    expect(validateFinding({ evidence: 'x', confidence: 'banana' }, false)).toMatch(/confidence/)
+    expect(validateFinding({ evidence: 'x', confidence: 'high' }, false)).toBeNull()
   })
 })
 
@@ -1155,5 +1456,150 @@ describe('runProcess timeout reaps the process tree', () => {
     let alive = true
     try { process.kill(grandchild, 0) } catch { alive = false }
     expect(alive).toBe(false)
+  })
+})
+
+describe('storage hardening (batch 4)', () => {
+  type Exec = (a: unknown, e: unknown) => Promise<string>
+  const capture = (register: (ctx: never, config: ConfigType) => void, config: ConfigType): Record<string, { execute: Exec }> => {
+    const captured: Record<string, { execute: Exec }> = {}
+    register({ tools: { register: (t: { name: string }) => { captured[t.name] = t as { execute: Exec } } } } as never, config)
+    return captured
+  }
+
+  it('writeFileAtomic lands complete content', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'strix-atomic-'))
+    const file = join(dir, 'w.json')
+    await writeFileAtomic(file, '{"a":1}')
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ a: 1 })
+    await writeFileAtomic(file, '{"a":2}')
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ a: 2 })
+  })
+
+  it('listFindings skips a corrupt file instead of throwing', () => {
+    const config = scratchConfig()
+    const dir = join(config.workspaceDir, 'findings')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'F-001.json'), JSON.stringify({ id: 'F-001' }))
+    writeFileSync(join(dir, 'F-002.json'), '{broken')
+    expect(listFindings(config).map((f) => f.id)).toEqual(['F-001'])
+  })
+
+  it('readLedger skips torn lines', () => {
+    const config = scratchConfig()
+    const dir = join(config.workspaceDir, 'coverage')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'ledger.jsonl'),
+      ['{"id":"C-001"}', '{broken', '{"id":"C-002"}'].join('\n'),
+    )
+    expect(readLedger(config).map((e) => e.id)).toEqual(['C-001', 'C-002'])
+  })
+
+  it('coverage record appends and rejects blank fields', async () => {
+    const config = scratchConfig()
+    const tools = capture(registerCoverage, config)
+    const cov = tools.strix_coverage!
+    await cov.execute({ action: 'record', surface: 'http://t/', risk_area: 'SQLi', outcome: 'clean' }, {})
+    await cov.execute({ action: 'record', surface: 'http://t/about', risk_area: 'XSS', outcome: 'clean' }, {})
+    expect(readLedger(config)).toHaveLength(2)
+    await expect(cov.execute({ action: 'record', surface: '   ', risk_area: 'XSS', outcome: 'clean' }, {}))
+      .resolves.toMatch(/REJECTED/)
+    await expect(cov.execute({ action: 'record', surface: 'http://t/', risk_area: 'SQLi', outcome: 'maybe' }, {}))
+      .resolves.toMatch(/REJECTED/)
+    await expect(cov.execute({ action: 'update', id: '../../evil' }, {}))
+      .resolves.toMatch(/REJECTED/)
+  })
+
+  it('coverage update round-trips through the tool surface', async () => {
+    const config = scratchConfig()
+    const tools = capture(registerCoverage, config)
+    const cov = tools.strix_coverage!
+    await cov.execute({ action: 'record', surface: 'http://t/', risk_area: 'SQLi', outcome: 'needs_follow_up', evidence_note: 'pending' }, {})
+    await expect(cov.execute({ action: 'update', id: 'C-001', outcome: 'clean' }, {}))
+      .resolves.toContain('Moved C-001')
+    await expect(cov.execute({ action: 'update', id: 'C-404', outcome: 'clean' }, {}))
+      .resolves.toContain('not found')
+  })
+
+  it('budget record accumulates across reads (no lost increments)', async () => {
+    const config = scratchConfig()
+    const tools = capture(registerBudget, config)
+    const budget = tools.strix_budget!
+    await budget.execute({ action: 'record', input_tokens: 1000, output_tokens: 500 }, {})
+    await budget.execute({ action: 'record', input_tokens: 1000, output_tokens: 500 }, {})
+    const ledger = readBudget(config)
+    expect(ledger.records).toBe(2)
+    expect(ledger.inputTokens).toBe(2000)
+    const status = await budget.execute({ action: 'status' }, {})
+    expect(status).toContain('Tokens: 2000 in / 1000 out across 2 records.')
+  })
+
+  it('budget reset zeroes and audits the decision', async () => {
+    const config = scratchConfig()
+    const tools = capture(registerBudget, config)
+    const budget = tools.strix_budget!
+    await budget.execute({ action: 'record', input_tokens: 1000, output_tokens: 500 }, {})
+    await expect(budget.execute({ action: 'reset' }, {})).resolves.toContain('reset to zero')
+    expect(readBudget(config).records).toBe(0)
+    const log = readFileSync(join(config.workspaceDir, 'evidence', 'log.jsonl'), 'utf8')
+    expect(log).toContain('"outcome":"reset"')
+  })
+
+  it('finish appends exactly once; report preserves the close', async () => {
+    const config = scratchConfig()
+    const tools = capture(registerReport, config)
+    const report = tools.strix_report!
+    await report.execute({ action: 'report', engagement_title: 'T' }, {})
+    const four = {
+      executive_summary: 's', methodology: 'm', technical_analysis: 't', recommendations: 'r',
+    }
+    await expect(report.execute({ action: 'finish', caller_role: 'root', ...four }, {}))
+      .resolves.toContain('Engagement closed')
+    await expect(report.execute({ action: 'finish', caller_role: 'root', ...four }, {}))
+      .resolves.toMatch(/already closed/)
+    await report.execute({ action: 'report', engagement_title: 'T2' }, {})
+    const md = readFileSync(join(config.workspaceDir, 'report.md'), 'utf8')
+    expect(md).toContain(CLOSE_MARKER)
+    expect(md).toContain('# T2')
+    expect(md.indexOf(CLOSE_MARKER)).toBe(md.lastIndexOf(CLOSE_MARKER))
+  })
+
+  it('threat-model amend appends sections and rejects blanks', async () => {    const config = scratchConfig()
+    const tools = capture(registerThreatModel, config)
+    const tm = tools.strix_threat_model!
+    await tm.execute({ action: 'save', text: 'baseline model' }, {})
+    await tm.execute({ action: 'amend', text: 'boundary X is reachable' }, {})
+    await tm.execute({ action: 'amend', text: 'role Y exists' }, {})
+    const md = readFileSync(join(config.workspaceDir, 'threat-model.md'), 'utf8')
+    expect(md).toContain('baseline model')
+    expect(md).toContain('boundary X is reachable')
+    expect(md).toContain('role Y exists')
+    await expect(tm.execute({ action: 'amend', text: '   ' }, {})).resolves.toMatch(/REJECTED/)
+    await expect(tm.execute({ action: 'save', text: '' }, {})).resolves.toMatch(/REJECTED/)
+  })
+
+  it('validates pip package specs without blocking pins and extras', () => {
+    expect(validPipPackages('requests==2.31.0')).toBe(true)
+    expect(validPipPackages('a>=1,<2 b~=1.4 c[x,y]')).toBe(true)
+    expect(validPipPackages('')).toBe(true)
+    for (const bad of ['--index-url http://evil', '-r req.txt', '--find-links /x', '--extra-index-url http://e', 'pkg; rm -rf /']) {
+      expect(validPipPackages(bad)).toBe(false)
+    }
+  })
+
+  it('clamps model-supplied timeouts to sane bounds', () => {
+    expect(clampTimeoutMs(5000, 1000)).toBe(5000)
+    expect(clampTimeoutMs(-5, 1000)).toBe(1000)
+    expect(clampTimeoutMs(0, 1000)).toBe(1000)
+    expect(clampTimeoutMs(Number.NaN, 1000)).toBe(1000)
+    expect(clampTimeoutMs('x', 1000)).toBe(1000)
+    expect(clampTimeoutMs(99_999_999, 1000)).toBe(3_600_000)
+  })
+
+  it('reads the bundle version from package.json instead of a constant', () => {
+    // Must track package.json (not the old hardcoded 0.8.0) and look like semver.
+    expect(strixDhVersion()).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(strixDhVersion()).not.toBe('0.8.0')
   })
 })

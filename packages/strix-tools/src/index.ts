@@ -162,7 +162,7 @@ export function methodologySection(config: ConfigType): string {
     '  result, never in notes/findings/reports),',
     '  (b) authorized low-rate validation in scope, (c) authorization.json fields',
     '  pre_approved_post_paths / pre_approved_post_body (exact path + body',
-    '  allowlist for POST-only proofs), (d) scoped strix_shell/strix_pybox under',
+    '  allowlist for state-changing proofs), (d) scoped strix_shell/strix_pybox under',
     '  approvalAutoAllow. If ANY exists, USE IT WITHOUT ASKING. Only when NO',
     '  pre-approved path exists may you state the block as a coverage entry',
     '  (needs_follow_up, naming the exact missing input) AND in the SAME turn',

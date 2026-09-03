@@ -12,11 +12,11 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { mirrorEvent } from '../lib/session-mirror.js'
-import { nextIdAmong, workspaceSub } from '../lib/util.js'
+import { nextIdAmong, safeId, workspaceSub, writeFileAtomic } from '../lib/util.js'
 
 export const OUTCOMES = ['clean', 'finding', 'needs_follow_up', 'blocked', 'ruled_out'] as const
 
@@ -37,13 +37,25 @@ function ledgerFile(config: ConfigType): string {
 export function readLedger(config: ConfigType): CoverageEntry[] {
   const file = ledgerFile(config)
   if (!existsSync(file)) return []
-  return readFileSync(file, 'utf8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => JSON.parse(l) as CoverageEntry)
+  const out: CoverageEntry[] = []
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line) as CoverageEntry
+      if (parsed && typeof parsed.id === 'string') out.push(parsed)
+    } catch {
+      /* skip the torn line; the rest of the ledger still counts */
+    }
+  }
+  return out
 }
 
 export function writeLedger(config: ConfigType, entries: CoverageEntry[]): void {
+  // Whole-file rewrite: kept synchronous for tests and one-shot repairs.
+  // The live update path uses writeFileAtomic instead (no torn reads).
+  // Concurrent updates to the SAME entry are last-writer-wins — re-list
+  // before editing when another agent may be writing. record() never takes
+  // this path (it appends, below), so concurrent records cannot lose rows.
   writeFileSync(ledgerFile(config), entries.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8')
 }
 
@@ -89,8 +101,8 @@ export function registerCoverage(ctx: Context, config: ConfigType) {
         }
 
         if (args.action === 'record') {
-          if (!args.surface || !args.risk_area || !args.outcome) {
-            return 'REJECTED: surface, risk_area, and outcome are required to record.'
+          if (!String(args.surface ?? '').trim() || !String(args.risk_area ?? '').trim() || !args.outcome) {
+            return 'REJECTED: surface, risk_area, and outcome are required to record (blank strings do not count).'
           }
           if (!OUTCOMES.includes(args.outcome as (typeof OUTCOMES)[number])) {
             return `REJECTED: outcome must be one of ${OUTCOMES.join(', ')}.`
@@ -105,17 +117,26 @@ export function registerCoverage(ctx: Context, config: ConfigType) {
             evidence_note: String(args.evidence_note ?? ''),
             recorded_at: new Date().toISOString(),
           }
-          entries.push(entry)
-          writeLedger(config, entries)
+          // Append-only: concurrent records from parallel subagents share one
+          // O_APPEND write each, so no row is ever lost to a read-modify-write
+          // race (the previous full-file rewrite dropped rows). Residual risk
+          // is a duplicate id on same-instant records — both rows survive and
+          // list shows both; update addresses the first match.
+          appendFileSync(ledgerFile(config), JSON.stringify(entry) + '\n', 'utf8')
           mirrorEvent(exec, 'strix/coverage', {
             action: 'record',
             entry: { id: entry.id, surface: entry.surface, risk_area: entry.risk_area, outcome: entry.outcome, evidence_note: entry.evidence_note },
           })
-          return `Recorded ${entry.id}: ${entry.surface} — ${entry.risk_area} → ${entry.outcome}.`
+          const hint =
+            entry.outcome === 'ruled_out' && !entry.evidence_note.trim()
+              ? ' Hint: ruled_out should name the specific reason (no login / no params / static page) — update this row with it.'
+              : ''
+          return `Recorded ${entry.id}: ${entry.surface} — ${entry.risk_area} → ${entry.outcome}.${hint}`
         }
 
         if (args.action === 'update') {
           const id = String(args.id ?? '')
+          if (!safeId(id)) return `REJECTED: bad coverage id "${args.id}".`
           const entry = entries.find((e) => e.id === id)
           if (!entry) {
             return `Entry ${id} not found. Ledger:\n${entries.map((e) => `${e.id} ${e.surface}`).join('\n') || '(empty)'}`
@@ -130,7 +151,7 @@ export function registerCoverage(ctx: Context, config: ConfigType) {
           }
           if (args.evidence_note !== undefined) entry.evidence_note = String(args.evidence_note)
           entry.updated_at = new Date().toISOString()
-          writeLedger(config, entries)
+          await writeFileAtomic(ledgerFile(config), entries.map((e) => JSON.stringify(e)).join('\n') + '\n')
           mirrorEvent(exec, 'strix/coverage', {
             action: 'update',
             entry: { id: entry.id, surface: entry.surface, risk_area: entry.risk_area, outcome: entry.outcome, evidence_note: entry.evidence_note },
@@ -138,7 +159,7 @@ export function registerCoverage(ctx: Context, config: ConfigType) {
           return `Moved ${id}: ${entry.surface} — ${entry.risk_area} → ${entry.outcome}.`
         }
 
-        return `Unknown action "${args.action}". Use record | update | list.`
+        return `REJECTED: unknown action "${args.action}". Use record | update | list.`
       },
     }),
   )

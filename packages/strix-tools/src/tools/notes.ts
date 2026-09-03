@@ -5,11 +5,11 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { mirrorEvent } from '../lib/session-mirror.js'
-import { nextSequentialId, safeId, workspaceSub, writeExclusive } from '../lib/util.js'
+import { nextSequentialId, safeId, workspaceSub, writeExclusive, writeFileAtomic } from '../lib/util.js'
 
 interface Note {
   id: string
@@ -26,10 +26,16 @@ function notesDir(config: ConfigType): string {
 function readNotes(config: ConfigType): Note[] {
   const dir = notesDir(config)
   if (!existsSync(dir)) return []
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.json'))
-    .sort()
-    .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as Note)
+  const out: Note[] = []
+  for (const f of readdirSync(dir).filter((name) => name.endsWith('.json')).sort()) {
+    // Fail-soft like listFindings: one corrupt note must not break list/get.
+    try {
+      out.push(JSON.parse(readFileSync(join(dir, f), 'utf8')) as Note)
+    } catch {
+      /* skip the corrupt file */
+    }
+  }
+  return out
 }
 
 export function registerNotes(ctx: Context, config: ConfigType) {
@@ -67,7 +73,7 @@ export function registerNotes(ctx: Context, config: ConfigType) {
           return note ? `${note.id} — ${note.title}\n\n${note.body}` : `Note ${id} not found.`
         }
         if (args.action === 'create') {
-          if (!args.title || !args.body) return 'REJECTED: title and body are required.'
+          if (!String(args.title ?? '').trim() || !String(args.body ?? '').trim()) return 'REJECTED: title and body are required (blank strings do not count).'
           // Max-existing-id + 1, not count + 1: strix_notes has a delete
           // action, so a gap in the middle is normal and count+1 would
           // overwrite the last live note. The O_EXCL write claims the slot
@@ -93,7 +99,9 @@ export function registerNotes(ctx: Context, config: ConfigType) {
           if (args.title !== undefined) note.title = String(args.title)
           if (args.body !== undefined) note.body = String(args.body)
           note.updated_at = new Date().toISOString()
-          writeFileSync(join(dir, `${note.id}.json`), JSON.stringify(note, null, 2), 'utf8')
+          // Atomic rewrite (same guarantee as finding update; concurrent
+          // updates to the same note are last-writer-wins).
+          await writeFileAtomic(join(dir, `${note.id}.json`), JSON.stringify(note, null, 2))
           mirrorEvent(exec, 'strix/note', { action: 'update', note: { id: note.id, title: note.title, body: note.body } })
           return `Updated ${note.id}.`
         }
@@ -106,7 +114,7 @@ export function registerNotes(ctx: Context, config: ConfigType) {
           mirrorEvent(exec, 'strix/note', { action: 'delete', note: { id } })
           return `Deleted ${id} (only for notes that are wrong or superseded — living inventories should be updated, not recreated).`
         }
-        return `Unknown action "${args.action}". Use create | list | get | update | delete.`
+        return `REJECTED: unknown action "${args.action}". Use create | list | get | update | delete.`
       },
     }),
   )

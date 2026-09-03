@@ -1,6 +1,6 @@
 # StriX-DH 工具参考手册
 
-> 12 个工具的完整契约：参数、输出、真实运行实例、错误模式与配置交互。
+> 16 个工具的完整契约：参数、输出、真实运行实例、错误模式与配置交互。
 > 所有示例输出均来自本项目的真实验证运行（2026-09-03，dsh 0.1.2-alpha.5）。
 >
 > ⚠️ 每个工具的 description 本身就是注入给模型的行为规则——修改措辞前先读 `docs/prompt-design.md`。
@@ -27,7 +27,8 @@
 
 ```
 Engagement workspace: C:\Users\20327\.dsh\strix-workspace
-findings: 1 registered (F-001.json)
+findings: 1 registered
+  F-001 [critical] (rce) title — target
 coverage: empty
 notes: 0
 threat-model: not established
@@ -79,7 +80,7 @@ age: 245897
 
 **配置交互**：`httpTimeoutMs`、`httpMaxBodyChars`、`httpPostCapPerPath`（默认 5）。
 
-**POST 政策**（0.11.0）：三分支——① 命中 `pre_approved_post_paths`（精确 path+body）→ 直发 + clearance 审计行；② 未命中但存在有效（未过期）授权 → 直发 + `[non-preapproved POST <path> — live authorization, count n/N]` 审计戳，按 path 计入 `workspace/http-post-counts.json`；③ 无授权 → 与旧版一致直发。超 `httpPostCapPerPath` 时 REJECTED，指引记 `needs_follow_up` 并申请预批，不许换词重试。
+**POST 政策**（0.11.0；0.12.0 起与 proxy replay 共用同一实现 `evaluatePostPolicy`，动词覆盖 POST/PUT/PATCH/DELETE）：三分支——① 命中 `pre_approved_post_paths`（精确 path + 精确 body，`body:"*"` 通配任意体；子串不算命中；四个动词共用）→ 直发 + clearance 审计行；② 未命中但存在有效（未过期）授权 → 直发 + `[non-preapproved <VERB> <path> — live authorization, count n/N]` 审计戳，按 path 计入 append-only 台账 `workspace/http-post-counts.jsonl`（旧版 `.json` 只读兼容，计数四动词共享）；③ 无授权 → 与旧版一致直发。超 `httpPostCapPerPath` 时 REJECTED，指引记 `needs_follow_up` 并申请预批，不许换词重试（换动词也不行——同一 path 预算）。**剩余旁路声明**：GET/HEAD 系读操作不计数（by design）；shell/pybox 的网络行为由**逐调用人工审批门**覆盖（任意代码执行的安全边界，比计数更强的控制，不在此台账里；无人值守 `approvalGate:'off'` 下靠镜像 allowlist + 操作者自担）。
 
 ---
 
@@ -138,7 +139,7 @@ Registered F-001 [info] Toolchain verification entry — local-verification.
 **输出**：写 `workspace/report.md`，返回路径与统计。结构：Scope & Authorization（含授权摘要段：targets/granted_by/scope_ref/valid_until/约束/预批 POST 数/测试账号掩码；无授权写 none recorded）→ Executive Summary（按严重度计数）→ Findings（逐个：严重度/CVSS/类型/目标/confidence/描述/证据代码块/PoC 脚本/反证/修复/白盒 diff）→ **Coverage Ledger（含测过没洞的表面；ruled_out 行单独计数注释）** → Methodology。报告头打印 workspace 路径（一目标一工作区，跨 engagement 混用前先看 `strix_runs`）。
 
 - `action=sarif`：写 `workspace/findings.sarif`（SARIF 2.1.0：规则按漏洞类 `strix/<type>` + coverage 区 `strix/coverage/<area>`；severity 折三级、原标签+CVSS 留 `properties.strix`；无源码位置的 DAST 发现锚定 SECURITY.md 合成位置并标记；`code_locations` 出 fixes；coverage 作 pass/open 非失败 result）。实测：`3 rules, 4 results: 1 findings, 3 coverage`，可 `upload-sarif` 进 CI。
-- `action=finish`：仅编排者关闭 engagement（`caller_role=operator` 拒绝，指路 `send_message` 向父汇报；缺段逐项点名），四段追加到 report.md 尾 `## Engagement Close (finish)`。
+- `action=finish`：仅编排者关闭 engagement（`caller_role=operator` 拒绝，指路 `send_message` 向父汇报；缺段逐项点名），四段追加到 report.md 尾 `## Engagement Close (finish)`。**幂等**：已有关闭段时第二次 finish 拒绝（直接改 report.md）；`report` 重生成会保留已有关闭段（report→finish→report 不会静默 un-close）。
 
 **真实输出示例**：
 
@@ -251,9 +252,11 @@ Authorization attestation revoked. The agent is back to passive-only until a new
 | `workdir` | 容器内工作目录，默认 /workspace |
 | `background` | `true` 时以后台 dsh job 运行，立即返回 job id；用 `job_output` 读流式输出、`job_kill` 终止 |
 
-**语义**：一次性容器（`docker run --rm`），workspace 只读挂载为 `/workspace`——**每次调用无状态**，持久状态写 workspace 文件。引擎在容器里跑，天然与宿主隔离。
+**语义**：一次性容器（`docker run --rm --cidfile`），workspace **读写**挂载为 `/workspace`——**每次调用无状态**，持久状态写 workspace 文件。引擎在容器里跑，与宿主进程隔离，但容器内可读写工作区全部文件（含 findings 与授权文件；blast radius 即工作区）。
 
-**后台模式**：`background=true` 时命令经审批门放行后注册为 `strix-shell-N` job（dsh 自带 `job_output`/`job_list`/`job_kill` 管理，无需插件自写）。适合长扫描：调用立即返回，模型可并行干别的，再用 `job_output` 轮询。kill 发 SIGKILL，5 秒后仍未退出则强制 settle 记录（防僵尸条目）。
+**超时/kill 语义（0.12.0 起）**：杀本机 docker CLI 停不掉 daemon 侧容器——因此超时与 `job_kill` 会对 cidfile 记录的容器 `docker rm -f`，输出追加 `[container removed after timeout]`（前景）/ job 记 `timeout exceeded (container removed)`。不再有"工具已返回、扫描还在打目标"的残留。
+
+**后台模式**：`background=true` 时命令经审批门放行后注册为 `strix-shell-N` job（dsh 自带 `job_output`/`job_list`/`job_kill` 管理，无需插件自写）。适合长扫描：调用立即返回，模型可并行干别的，再用 `job_output` 轮询。kill 发 SIGKILL 并 `docker rm -f` 对应容器，5 秒后仍未退出则强制 settle 记录（防僵尸条目）。**后台完成会补记** `evidence/log.jsonl` 的 result 行（含 exitCode/durationMs）——长扫描路径不是审计黑洞。
 
 **真实后台输出**（headless 冒烟，`echo bg-smoke-ok && sleep 2 && echo bg-done` + `background=true`）：
 
@@ -281,7 +284,7 @@ Python 3.12.14
 root
 ```
 
-**错误模式**：Docker 不可用 → 返回安装指引；超时 → `[timed out and killed]`。
+**错误模式**：Docker 不可用 → 返回安装指引；超时 → `[timed out and killed]` + `[container removed after timeout — no residual workload]`。
 
 **审批门（HITL）**：每次调用先经过 dsh ApprovalService 请求操作者批准，只有 `allowed-once` 才会执行；`rejected` / `cancelled` / `unavailable` 一律 fail-closed 拒绝。真实拒绝输出（headless 环境，无应答器）：
 
@@ -302,7 +305,7 @@ accept responsibility for.
 |---|---|
 | `script` | Python 源码（存为 `workspace/pybox/<run>/main.py`） |
 | `files` | 附属文件（字典：文件名→内容；拒绝路径分隔符） |
-| `install_packages` | 运行前 pip 安装（需网络） |
+| `install_packages` | 运行前 pip 安装（需网络；仅允许包名+版本 pin，`--index-url`/`-r` 等 flag 拒绝） |
 | `arguments` | JSON 写入 `args.json` 供脚本读取（避免复杂引号转义） |
 | `timeout_ms` / `network` | 默认 60s / 开 |
 
@@ -331,6 +334,8 @@ pybox-ok sandbox-verification
 
 **输出**：navigate 返回页面标题；screenshot 保存 `workspace/screenshots/<session>-<ts>.png` 并返回路径（用 dsh 原生 `read_image` 查看）；content 返回截断 HTML。
 
+**自动 spray-guard（0.12.0，无需人工）**：每个新 page 挂 `page.route('**/*', …)` 拦截全部请求——读操作（GET/HEAD/OPTIONS）快速放行；写操作（POST/PUT/PATCH/DELETE，含表单提交与 `evaluate` 里的 XHR/fetch）走与 strix_http 完全相同的政策（预批匹配、按 path 计数、四动词共享 cap），超 cap 的在发出前 `abort`， verdict 追加进本次 action 的返回文本。可配 `browserEnforcePostPolicy`（默认 true；false 关拦截）。guard 自身异常时写操作 fail-closed 拦截、绝不静默放行。
+
 **真实输出示例**：
 
 ```
@@ -349,11 +354,11 @@ Session "verify" closed.
 
 | 参数 | 说明 |
 |---|---|
-| `domain` | 基础域名（无 scheme，自动归一化） |
+| `domain` | 基础域名（无 scheme，自动归一化；仅字母/数字/点/横线，拒绝路径/端口/遍历；必须落在有效授权 targets 内，否则 REJECTED——recon 发流量，不跑无授权扫描） |
 | `skip_httpx` | 只枚举子域，跳过存活探测 |
-| `timeout_ms` | 每引擎超时（默认 300s） |
+| `timeout_ms` | 每引擎超时（默认 300s，钳制 (0, 1h]） |
 
-**流程**：subfinder 被动枚举 → `recon/<domain>/subs.txt` → httpx（`-title -status-code -tech-detect`）→ `recon/<domain>/live.txt` → 返回汇总。
+**流程**：subfinder 被动枚举 → `recon/<domain>/subs.txt` → httpx（`-l subs.txt -title -status-code -tech-detect`，子域列表显式投喂——无 stdin 通道）→ `recon/<domain>/live.txt` → 返回汇总。
 
 **真实输出示例**：
 
@@ -372,20 +377,20 @@ Session "verify" closed.
 | 参数 | 说明 |
 |---|---|
 | `engine` | nuclei / semgrep |
-| `target` | nuclei: 目标 URL；semgrep: 本地源码目录（绝对路径可触发容器回退） |
+| `target` | nuclei: 目标 URL（必须 http(s) 且落在有效授权内，否则 REJECTED）；semgrep: 本地源码目录（必须在工作区或 `sastExtraMountRoots` 内，否则 REJECTED；绝对路径可触发容器回退） |
 | `severity` | nuclei 严重度过滤（info/low/medium/high/critical/unknown 白名单，默认全部） |
-| `extra_args` | 附加参数（空格分割；模板选择/输出格式/代理路由全开放，仅禁三类：重定向目标 `-u -target -l`、限速并发 `-rl -c`、引擎配置 `-config -update`） |
+| `extra_args` | 附加参数（空格分割；模板选择/输出格式/代理路由全开放；黑名单按引擎分表——nuclei 禁重定向目标/限速并发/引擎配置，semgrep 放行 `-l/--lang` 但禁 `--remote/--metrics/--upload`；匹配经归一化：大小写、前导横线、`=` 后值、`-rl100` 粘连形式均覆盖） |
 
 **执行策略**：
 
-- **nuclei 容器优先**（`projectdiscovery/nuclei` 镜像自带模板库；规避沙箱子进程写配置目录的 Access denied 挂起），宿主二进制仅作无 Docker 回退
-- **semgrep 容器回退**（Windows 无原生支持时用 `returntocorp/semgrep` 镜像挂载 `/src`）
-- 速率限制默认 `nucleiRateLimit: 50`/s——非自有目标不要调高
+- **nuclei 容器优先**（`sastNucleiImage`，默认 `projectdiscovery/nuclei:latest`，自带模板库；规避沙箱子进程写配置目录的 Access denied 挂起），宿主二进制仅作无 Docker 回退
+- **semgrep 容器回退**（`sastSemgrepImage`，默认 `returntocorp/semgrep:latest`，挂载 `/src:ro` 只读；工作区外目标拒绝）
+- 速率限制默认 `nucleiRateLimit: 50`/s——非自有目标不要调高；容器网络走 `sastNetwork`（默认开）
 
 **真实输出示例**：
 
 ```
-nuclei scan via container (projectdiscovery/nuclei) (rate limit 50/s):
+nuclei scan via container (projectdiscovery/nuclei:latest, templates volume) (rate limit 50/s):
 [exit code: 0]
 Remember: these are template matches, not validated findings.
 ```
@@ -405,9 +410,9 @@ Remember: these are template matches, not validated findings.
 | `filter` / `limit` | list：按 method/url/status 子串过滤；最多显示条数，默认 20 |
 | `id` | get/replay：flow id（`F-…`） |
 
-**架构**：`mitmdump` 跑在官方 `mitmproxy/mitmproxy` 容器里（workspace 挂 `/workspace`，addon 挂 `/addon.py:ro`），`assets/mitmproxy/strix_addon.py` 把每个完整 flow 记成 `workspace/proxy/flows.jsonl` 一行摘要 + `flows/<id>.req` / `.rsp` 原始报文。replay 经共享 `sendHttpRequest`（与 strix_http 同一 fetch 路径、同一输出格式）重发。
+**架构**：`mitmdump` 跑在官方 `mitmproxy/mitmproxy` 容器里（镜像可配 `proxyImage`，workspace 挂 `/workspace`，addon 挂 `/addon.py:ro`），`assets/mitmproxy/strix_addon.py` 把每个完整 flow 记成 `workspace/proxy/flows.jsonl` 一行摘要 + `flows/<id>.req` / `.rsp` 原始报文。replay 经共享 `sendHttpRequest`（与 strix_http 同一 fetch 路径、同一输出格式）重发——**且 POST 重放走同一喷洒 guard**（预批匹配、按 path 计数、cap 熔断与 strix_http 共用 `evaluatePostPolicy`，replay 不能绕过）。
 
-**诚实限制**：HTTPS 正文需客户端信任侧车 CA（`workspace/proxy/.mitmproxy/mitmproxy-ca-cert.pem`）；不装 CA 时只记 CONNECT 元数据，replay 会明确拒绝（"has no replayable URL"）。同一 workspace 一次只跑一个侧车。stop 双路径：同进程 pid kill + 跨进程 `docker stop`（headless 退出后 pid 失效，靠后者——实测修过）。
+**诚实限制**：HTTPS 正文需客户端信任侧车 CA（`workspace/proxy/.mitmproxy/mitmproxy-ca-cert.pem`）；不装 CA 时只记 CONNECT 元数据，replay 会明确拒绝（"has no replayable URL"）。同一 workspace 一次只跑一个侧车。stop 双路径：同进程 pid kill（**先经 OS 校验确为 docker CLI 进程**——sidecar.json 在模型可写区，伪造 pid 永不到 `process.kill`）+ 跨进程 `docker stop`（headless 退出后 pid 失效，靠后者——实测修过）。
 
 **SCOPE（相对上游 Caido scope 的如实差异）**：上游 Caido 有 scope get/list/create/update/delete 做目标过滤；本实现**无 scope 名单**——单 workspace 单侧车，经过代理端口的流量全收。操作者用"只把已授权客户端指向代理端口"来划定范围，这点已写进工具 description，模型每次调用都能看到。
 
@@ -432,7 +437,7 @@ Sidecar stopped. 2 flow(s) remain queryable (list/get/replay).
 | `action` | check / kev-refresh / status |
 | `packages` | check：`[{ecosystem, name, version}]`（ecosystem 如 npm/PyPI/Go/Maven；单次至多 50 个） |
 
-**链路**：OSV `querybatch` 主查（包+版本 → 漏洞 id）→ `vulns/{id}` 明细（summary/CVSS_V3/fixed 版本/CVE 别名）→ KEV 缓存命中（`workspace/vulndb/kev.json`，24h TTL，缺失/过期自动刷）→ EPSS 逐 CVE 取分 → KEV 命中优先、EPSS 降序输出。结果直喂 `strix_finding create vulnerability_type=dependency_cve`（`dedupe-check` 按 CVE+包名排重）。**先证可达再登记**：有洞依赖只是 lead。
+**链路**：OSV `querybatch` 主查（包+版本 → 漏洞 id）→ `vulns/{id}` 明细（summary/CVSS_V3/fixed 版本/CVE 别名）→ KEV 缓存命中（`workspace/vulndb/kev.json`，24h TTL，缺失/过期自动刷）→ EPSS 逐 CVE 取分 → KEV 命中优先、EPSS 降序输出。结果直喂 `strix_finding create vulnerability_type=dependency_cve`（`dedupe-check` 按 CVE+包名排重）。**先证可达再登记**：有洞依赖只是 lead。**预算门**：`check` 是重型 fan-out（1+N+M 个网络请求），与其他重型工具同式查账（warn 前缀/block 拒止）。
 
 **真实输出**（headless，lodash@4.17.20）：
 
@@ -448,7 +453,7 @@ Sidecar stopped. 2 flow(s) remain queryable (list/get/replay).
 
 ## strix_budget — LLM 花费台账
 
-**背景**：dsh 的 token-meter 只计量上下文压力、不给美元价，alpha.5 也没有价格 API——所以本台账用操作者配置的每 1K 单价显式记账（代码默认 DeepSeek V3.2 官价：input $0.00027/1K，output $0.0004/1K；本机三个 profile 已覆盖为 muse-spark-1.3-contributor 经 opencodego 的价格：input $0.0001/1K，output $0.0002/1K），累计值存 `workspace/budget.json`。台账的诚实度取决于记录：agent 每 turn 如实 `record` 自己的用量。dsh 将来开放 usage 订阅后可改自动喂数，台账格式已预留。
+**背景**：dsh 的 token-meter 只计量上下文压力、不给美元价，alpha.5 也没有价格 API——所以本台账用操作者配置的每 1K 单价显式记账（代码默认 DeepSeek V3.2 官价：input $0.00027/1K，output $0.0004/1K；本机三个 profile 已覆盖为 muse-spark-1.3-contributor 经 opencodego 的价格：input $0.0001/1K，output $0.0002/1K），基线存 `workspace/budget.json`、每次 `record` 追加一行到 `workspace/budget-records.jsonl`（append-only，并发 turn 不丢增量；读时聚合）。台账的诚实度取决于记录：agent 每 turn 如实 `record` 自己的用量。dsh 将来开放 usage 订阅后可改自动喂数，台账格式已预留。`reset` 清零并截断记录文件，同时在 `evidence/log.jsonl` 留审计行。
 
 | 参数 | 说明 |
 |---|---|
@@ -478,15 +483,19 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | 配置 | 默认 | 影响 |
 |---|---|---|
 | `workspaceDir` | `''` → `~/.dsh/strix-workspace` | 全部产物根目录 |
-| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http（cap：同 path 非预批 POST 上限，存 `workspace/http-post-counts.json`） |
+| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http（cap：同 path 非预批 POST 上限，存 append-only 台账 `workspace/http-post-counts.jsonl`，旧 `.json` 只读兼容；proxy POST replay 共用同一政策） |
 | `shellImage` / `shellNetwork` / `shellTimeoutMs` | python:3.12-slim / true / 120s | strix_shell |
-| `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox |
+| `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox（预装包与单次 `install_packages` 合并安装） |
 | `binariesDir` | `''` | recon/sast 二进制发现（`~/.dsh/bin` 始终在搜索路径） |
 | `reconTimeoutMs` / `nucleiRateLimit` | 300s / 50 | strix_recon / strix_sast |
+| `sastNucleiImage` / `sastSemgrepImage` / `sastNetwork` | projectdiscovery/nuclei:latest / returntocorp/semgrep:latest / true | strix_sast 容器镜像与网络 |
+| `sastExtraMountRoots` | `[]` | strix_sast：工作区之外允许 semgrep 扫描的宿主根目录 |
+| `proxyImage` | mitmproxy/mitmproxy:latest | strix_proxy 侧车镜像 |
 | `browserHeadless` | true | strix_browser |
+| `browserEnforcePostPolicy` | true | strix_browser 写操作自动 spray-guard（与 strix_http 同政策） |
 | `strictEvidence` | true | strix_finding 无证据拒收 |
 | `approvalGate` | `'always'` | strix_shell / strix_pybox 每次调用经 ApprovalService 审批；`'off'` 关闭（仅限操作者自担责任的无人值守运行） |
-| `budgetLimitUsd` | `0`（不限） | strix_budget 花费上限（USD）；recon/sast 执行前查账，超限按 budgetAction 处理 |
+| `budgetLimitUsd` | `0`（不限） | strix_budget 花费上限（USD）；recon/sast/depcheck/proxy 执行前查账，超限按 budgetAction 处理 |
 | `budgetInputPer1k` / `budgetOutputPer1k` | `0.00027` / `0.0004` | 记账单价（代码默认 DeepSeek V3.2 官价；本机 profile 已覆盖为 0.0001/0.0002；换模型时改 profile 覆盖层） |
 | `budgetAction` | `'warn'` | 超限后重型工具行为：`'warn'` 前置警告继续，`'block'` 拒绝执行 |
 
@@ -497,8 +506,8 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 strix_shell 和 strix_pybox 是套件中唯二能在容器里执行任意命令/代码的工具，因此绑定 dsh 的
 [ApprovalService]（`@deepseek-ai/dsh-user-approval`，alpha.5 起）做逐调用审批：
 
-1. 工具执行前先过 `approvalAutoAllow` 预批（正则数组，默认空=不放宽）：命令摘要命中任一条即自动放行并记 `auto-allowed` 审计；未命中才调用 `ctx.approval.request({ agent, toolName, callId, reason, signal })`，
-   `reason` 是给人看的命令摘要（命令前 160 字符 / 脚本首行 + 体积 + pip 包 + 网络开关）。典型预批：只读命令 `^strix_shell: run "(echo|uname|whoami|id|ls|cat|head|tail|grep|jq)`。
+1. 工具执行前先过 `approvalAutoAllow` 预批（正则数组，默认空=不放宽）：全文命中任一条即自动放行并记 `auto-allowed` 审计；未命中才调用 `ctx.approval.request({ agent, toolName, callId, reason, signal })`，
+   `reason` 是截断展示（超 400 字符截断 + 全文长度 + sha256 戳），预批正则永远匹配**全文**——前缀型预批无法被截断后的载荷欺骗；展示含超时/workdir 等执行参数。典型预批：只读命令 `^strix_shell: run "(echo|uname|whoami|id|ls|cat|head|tail|grep|jq)`。
 2. 结果四种：`allowed-once`（唯一放行）、`rejected`、`cancelled`、`unavailable`。
    **除放行外全部拒绝执行**（与 dsh 对 `unavailable` 的 fail-closed 规则一致）。
 3. 服务自动向会话事件日志追加 `approval/asked` + `approval/decided` 审计对；

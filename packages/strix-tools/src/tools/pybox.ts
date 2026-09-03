@@ -10,11 +10,26 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
-import { createApprovalGate, logEvidence } from '../lib/approval.js'
-import { dockerRun, formatRunResult, truncate, workspaceSub } from '../lib/util.js'
+import { createApprovalGate, logEvidence, splitApprovalSummary } from '../lib/approval.js'
+import { dockerRun, formatRunResult, safeId, clampTimeoutMs, truncate, workspaceSub } from '../lib/util.js'
+
+/**
+ * pip package spec allowlist: version pins (`==`, `>=`, `~=`, `,`), extras
+ * (`pkg[extra]`), and plain names — but never a token starting with `-`
+ * (`--index-url`, `-r`, `--find-links`, `--extra-index-url` would redirect
+ * the dependency source). The script itself is already arbitrary code, so
+ * this is about keeping the install line reviewable, not about containment.
+ * Pure — unit-tested.
+ */
+export function validPipPackages(spec: string): boolean {
+  if (!spec.trim()) return true
+  if (!/^[A-Za-z0-9_.\-=<>~, \[\]]+$/.test(spec)) return false
+  return !spec.split(/\s+/).some((t) => t.startsWith('-'))
+}
 
 export function registerPybox(ctx: Context, config: ConfigType) {
   const requestApproval = createApprovalGate(ctx, config)
@@ -42,22 +57,37 @@ export function registerPybox(ctx: Context, config: ConfigType) {
       async execute(raw: Record<string, unknown>, exec): Promise<string> {
         const args = raw as unknown as { script: string; files?: Record<string, string>; install_packages?: string; timeout_ms?: number; network?: boolean; arguments?: Record<string, unknown> }
         const network = args.network ?? config.pyboxNetwork
-        const packages = args.install_packages?.trim()
+        // Operator-configured base packages plus the per-call request share
+        // one install line (previously the config key was declared but never
+        // read — dead config).
+        const packages = [...(config.pyboxExtraPackages ?? []), args.install_packages?.trim() ?? '']
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(' ')
+        if (packages && !validPipPackages(packages)) {
+          return 'REJECTED: install_packages allows only package names with version pins (==, >=, ~=, extras [...]) — no flags (--index-url, -r, --find-links).'
+        }
+        // Match on the FULL script, display truncated+hash-stamped (same
+        // truncation-before-match fix as strix_shell).
+        const firstLine = args.script.split('\n').find((l) => l.trim()) ?? ''
+        const timeoutMs = clampTimeoutMs(args.timeout_ms, config.pyboxTimeoutMs)
         const gate = await requestApproval(
           exec,
-          `strix_pybox: run Python script (${args.script.length} chars, first line: "${truncate(args.script.split('\n').find((l) => l.trim()) ?? '', 120)}")`
-            + `${packages ? ` installing: ${packages}` : ''} (network: ${network ? 'on' : 'off'})`,
+          splitApprovalSummary(
+            `strix_pybox: run Python script (${args.script.length} chars, first line: "${truncate(firstLine, 120)}")`
+            + `${packages ? ` installing: ${packages}` : ''} (network: ${network ? 'on' : 'off'}, timeout: ${timeoutMs}ms)\n--- full script below ---\n${args.script}`,
+          ),
         )
         if (!gate.granted) return gate.message
 
-        const runDir = workspaceSub(config, 'pybox', `run-${Date.now()}`)
+        const runDir = workspaceSub(config, 'pybox', `run-${Date.now()}-${randomUUID().slice(0, 8)}`)
         writeFileSync(join(runDir, 'main.py'), args.script, 'utf8')
         if (args.arguments) {
           writeFileSync(join(runDir, 'args.json'), JSON.stringify(args.arguments, null, 2), 'utf8')
         }
         for (const [name, content] of Object.entries(args.files ?? {})) {
-          if (name.includes('..') || name.includes('/') || name.includes('\\')) {
-            return `REJECTED: file entry "${name}" must be a plain filename (no path separators).`
+          if (!safeId(name)) {
+            return `REJECTED: file entry "${name}" must be a plain filename (letters, digits, dash, underscore, dot — no path separators, no leading dot).`
           }
           writeFileSync(join(runDir, name), content, 'utf8')
         }
@@ -71,7 +101,7 @@ export function registerPybox(ctx: Context, config: ConfigType) {
         const result = await dockerRun(config, {
           image: config.pyboxImage,
           command,
-          timeoutMs: args.timeout_ms ?? config.pyboxTimeoutMs,
+          timeoutMs,
           network,
           workdir: `/workspace/pybox/${runDir.split(/[\\/]/).pop()}`,
         })

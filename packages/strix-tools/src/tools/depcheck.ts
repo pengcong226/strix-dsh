@@ -18,6 +18,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
+import { checkBudget } from './budget.js'
 import { workspaceSub } from '../lib/util.js'
 
 const OSV_BATCH = 'https://api.osv.dev/v1/querybatch'
@@ -214,6 +215,11 @@ export function registerDepcheck(ctx: Context, config: ConfigType) {
               return 'REJECTED: every package needs ecosystem, name, and version.'
             }
           }
+          // A 50-package check fans out to 1+N+M network calls — heavy like
+          // recon/sast, so the same budget gate applies (warn or block).
+          const gate = checkBudget(config, 'strix_depcheck')
+          if (gate.over && config.budgetAction === 'block') return gate.message
+          const warnPrefix = gate.over ? gate.message + '\n' : ''
 
           let batch: { results?: Array<{ vulns?: Array<{ id: string }> }> }
           try {
@@ -280,17 +286,17 @@ export function registerDepcheck(ctx: Context, config: ConfigType) {
           }
 
           if (rows.length === 0) {
-            return `${pkgs.length} package(s) checked against OSV: no known vulns. (Absence here is not proof of safety — unindexed or brand-new flaws miss every DB.)`
+            return `${warnPrefix}${pkgs.length} package(s) checked against OSV: no known vulns. (Absence here is not proof of safety — unindexed or brand-new flaws miss every DB.)`
           }
           const sorted = sortDepFindings(rows)
           return [
-            `${sorted.length} known vuln(s) in ${pkgs.length} package(s) (KEV-hit first, then EPSS):`,
+            `${warnPrefix}${sorted.length} known vuln(s) in ${pkgs.length} package(s) (KEV-hit first, then EPSS):`,
             ...sorted.map(formatDepFinding),
             'Next: prove reachability before filing — a vulnerable dependency is a lead. File confirmed ones with strix_finding create vulnerability_type=dependency_cve (dedupe-check keys on CVE + package).',
           ].join('\n')
         }
 
-        return `Unknown action "${args.action}". Use check | kev-refresh | status.`
+        return `REJECTED: unknown action "${args.action}". Use check | kev-refresh | status.`
       },
     }),
   )

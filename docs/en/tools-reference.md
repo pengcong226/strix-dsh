@@ -1,6 +1,6 @@
 # StriX-DH Tools Reference
 
-> Full contract of all 15 tools: parameters, outputs, real-run examples, error modes, and config interactions.
+> Full contract of all 16 tools: parameters, outputs, real-run examples, error modes, and config interactions.
 > Every sample output below comes from a real verification run of this project (2026-09-03, dsh 0.1.2-alpha.5).
 >
 > ⚠️ Each tool's `description` is itself a behavioral rule injected into the model — read `docs/prompt-design.md` before rewording any of them.
@@ -27,7 +27,8 @@ Shared conventions:
 
 ```
 Engagement workspace: C:\Users\20327\.dsh\strix-workspace
-findings: 1 registered (F-001.json)
+findings: 1 registered
+  F-001 [critical] (rce) title — target
 coverage: empty
 notes: 0
 threat-model: not established
@@ -77,7 +78,7 @@ age: 245897
 - Timeout → `"Request failed: timeout after Nms (aborted). The host may be filtered, down, or the port/scheme wrong — fix the target rather than retrying blindly."`
 - Connection failure → ships DNS/port/protocol troubleshooting hints; **treating "unreachable" as a finding is a methodology error** (mirrors the Strix discipline on Caido error pages)
 
-**Config interactions**: `httpTimeoutMs`, `httpMaxBodyChars`, `httpPostCapPerPath` (default 5). **POST policy** (0.11.0, three branches): pre-approved path+body → send + clearance line; live attestation but non-preapproved → send + audit stamp with per-path count in `workspace/http-post-counts.json`; no attestation → legacy behavior. Over-cap POSTs are REJECTED with a needs_follow_up pointer.
+**Config interactions**: `httpTimeoutMs`, `httpMaxBodyChars`, `httpPostCapPerPath` (default 5). **State-changing policy** (0.11.0, shared with proxy replay since 0.12.0 via `evaluatePostPolicy`; verbs POST/PUT/PATCH/DELETE): pre-approved exact path+body (`body:"*"` wildcards any body; substrings never match) → send + clearance line; live attestation but non-preapproved → send + audit stamp with per-path count in the append-only `workspace/http-post-counts.jsonl` (legacy `.json` merged read-only; counts shared across all four verbs); no attestation → legacy behavior. Over-cap sends are REJECTED with a needs_follow_up pointer — rewording bodies (or switching verbs on the same path) does not help. GET/HEAD are reads and stay uncounted by design; browser-fired writes are enforced automatically (see browser section); shell/pybox network behavior is covered by the per-call approval gate.
 
 ---
 
@@ -136,7 +137,7 @@ Registered F-001 [info] Toolchain verification entry — local-verification.
 **Output**: writes `workspace/report.md`, returns path + stats. Structure: Scope & Authorization (incl. authorization summary: targets/grant facts/pre-approved POST count/masked test accounts; header prints the workspace path — one target set, one workspace) → Executive Summary (counts by severity) → Findings (each: severity/CVSS/type/target/confidence/description/evidence code block/PoC script/counterevidence/remediation/white-box diff) → **Coverage Ledger (including reviewed-clean surfaces)** → Methodology.
 
 - `action=sarif`: writes `workspace/findings.sarif` (SARIF 2.1.0: rules keyed `strix/<type>` + coverage zones `strix/coverage/<area>`; severities collapse to three levels with raw label + CVSS kept in `properties.strix`; sourceless DAST findings anchor on a flagged synthetic SECURITY.md location; `code_locations` become fixes; coverage rides as pass/open non-failing results). Verified live: `3 rules, 4 results: 1 findings, 3 coverage`, ready for `upload-sarif` into CI.
-- `action=finish`: orchestrator-only engagement close (`caller_role=operator` is refused with a pointer to `send_message`; missing sections are named one by one), appending `## Engagement Close (finish)` with the four sections to report.md.
+- `action=finish`: orchestrator-only engagement close (`caller_role=operator` is refused with a pointer to `send_message`; missing sections are named one by one), appending `## Engagement Close (finish)` with the four sections to report.md. **Idempotent**: a second finish on an already-closed engagement is refused (amend report.md by hand); a regenerated `report` preserves the existing Close section (report→finish→report never silently un-closes).
 
 **Real output example**:
 
@@ -249,9 +250,11 @@ Authorization attestation revoked. The agent is back to passive-only until a new
 | `workdir` | Working directory inside the container, default /workspace |
 | `background` | `true` runs as a background dsh job returning the job id immediately; read streaming output with `job_output`, stop with `job_kill` |
 
-**Semantics**: one-shot container (`docker run --rm`), workspace mounted read-only at `/workspace` — **every call is stateless**, durable state goes to workspace files. Engines run inside the container, isolated from the host by construction.
+**Semantics**: one-shot container (`docker run --rm --cidfile`), workspace mounted **read-write** at `/workspace` — **every call is stateless**, durable state goes to workspace files. Engines run inside the container, isolated from the host as processes — but the container can read and write the whole workspace (findings, authorization files; the blast radius is the workspace).
 
-**Background mode**: with `background=true` the approved command registers as a `strix-shell-N` job (managed by dsh's own `job_output`/`job_list`/`job_kill`, no plugin-side tooling needed). Built for long scans: the call returns immediately, the model works on something else in parallel, then polls with `job_output`. Kill sends SIGKILL; a record that still has not exited after 5 seconds is force-settled (no zombie entries).
+**Timeout/kill semantics (0.12.0+)**: killing the local docker CLI never stops the daemon-side container — so timeouts and `job_kill` `docker rm -f` the recorded container id, and the output says so (`[container removed after timeout]`, jobs record `timeout exceeded (container removed)`). No more "the tool returned while the scan kept hitting the target".
+
+**Background mode**: with `background=true` the approved command registers as a `strix-shell-N` job (managed by dsh's own `job_output`/`job_list`/`job_kill`, no plugin-side tooling needed). Built for long scans: the call returns immediately, the model works on something else in parallel, then polls with `job_output`. Kill sends SIGKILL **and** `docker rm -f`s the recorded container; a record that still has not exited after 5 seconds is force-settled (no zombie entries). **Background completions are audited**: a result row (exitCode/durationMs) lands in `evidence/log.jsonl` — the long-scan path is not an audit hole.
 
 **Real background output** (headless smoke test, `echo bg-smoke-ok && sleep 2 && echo bg-done` + `background=true`):
 
@@ -279,7 +282,7 @@ Python 3.12.14
 root
 ```
 
-**Error modes**: Docker unavailable → install guidance; timeout → `[timed out and killed]`.
+**Error modes**: Docker unavailable → install guidance; timeout → `[timed out and killed]` + `[container removed after timeout — no residual workload]`.
 
 **Approval gate (HITL)**: every call first asks the operator through dsh's ApprovalService; only `allowed-once` executes; `rejected` / `cancelled` / `unavailable` all fail closed. Real denial output (headless, no answerer):
 
@@ -300,7 +303,7 @@ accept responsibility for.
 |---|---|
 | `script` | Python source (saved as `workspace/pybox/<run>/main.py`) |
 | `files` | Sidecar files (dict: filename→content; path separators rejected) |
-| `install_packages` | pip install before running (needs network) |
+| `install_packages` | pip install before running (needs network; names + version pins only — `--index-url`/`-r` style flags are rejected) |
 | `arguments` | JSON written to `args.json` for the script to read (avoids complex quoting) |
 | `timeout_ms` / `network` | Defaults 60s / on |
 
@@ -329,6 +332,8 @@ pybox-ok sandbox-verification
 
 **Output**: navigate returns the page title; screenshot saves to `workspace/screenshots/<session>-<ts>.png` and returns the path (view with dsh's native `read_image`); content returns truncated HTML.
 
+**Automated spray-guard (0.12.0, no human involved)**: every fresh page attaches a `page.route('**/*', …)` interceptor over all requests it fires — reads (GET/HEAD/OPTIONS) take a fast path; writes (POST/PUT/PATCH/DELETE, including form submits and XHR/fetch from `evaluate`) run the exact same policy as strix_http (pre-approval match, per-path counting, four-verb shared cap), and over-cap writes are aborted before they leave, with the verdict appended to that action's return text. Configurable via `browserEnforcePostPolicy` (default true). A guard failure on a write blocks fail-closed, never silently.
+
 **Real output example**:
 
 ```
@@ -347,11 +352,11 @@ Session "verify" closed.
 
 | Parameter | Notes |
 |---|---|
-| `domain` | Base domain (no scheme, auto-normalized) |
+| `domain` | Base domain (no scheme, auto-normalized; letters/digits/dots/hyphens only — paths, ports, and traversal rejected; must sit inside a live attestation or the call is REJECTED — recon sends traffic and never runs unattested) |
 | `skip_httpx` | Enumerate subdomains only, skip live probing |
-| `timeout_ms` | Per-engine timeout (default 300s) |
+| `timeout_ms` | Per-engine timeout (default 300s, clamped to (0, 1h]) |
 
-**Flow**: subfinder passive enumeration → `recon/<domain>/subs.txt` → httpx (`-title -status-code -tech-detect`) → `recon/<domain>/live.txt` → summary returned.
+**Flow**: subfinder passive enumeration → `recon/<domain>/subs.txt` → httpx (`-l subs.txt -title -status-code -tech-detect`, the subdomain list fed explicitly — there is no stdin channel) → `recon/<domain>/live.txt` → summary returned.
 
 **Real output example**:
 
@@ -370,20 +375,20 @@ Session "verify" closed.
 | Parameter | Notes |
 |---|---|
 | `engine` | nuclei / semgrep |
-| `target` | nuclei: target URL; semgrep: local source dir (absolute path triggers the container fallback) |
+| `target` | nuclei: target URL (must be http(s) and covered by a live attestation, otherwise REJECTED); semgrep: local source dir (must live under the workspace or a `sastExtraMountRoots` entry, otherwise REJECTED; absolute path triggers the container fallback) |
 | `severity` | nuclei severity filter (info/low/medium/high/critical/unknown allowlist, default all) |
-| `extra_args` | Extra arguments (space-split; template selection, output formats, and proxy routing fully open; only three classes barred: retargeting `-u -target -l`, rate-limit/concurrency `-rl -c`, engine config `-config -update`) |
+| `extra_args` | Extra arguments (space-split; template selection, output formats, and proxy routing fully open; per-engine block tables — nuclei bars retargeting/rate-limit-concurrency/engine-config, semgrep allows `-l/--lang` but bars `--remote/--metrics/--upload`; matching is normalized: case, leading dashes, `=`-values, and attached forms like `-rl100` are all covered) |
 
 **Execution strategy**:
 
-- **nuclei container-first** (`projectdiscovery/nuclei` image ships its own template library; avoids the Access-denied hang of sandboxed child processes writing config dirs), host binary only as a no-Docker fallback
-- **semgrep container fallback** (`returntocorp/semgrep` image mounting `/src` where Windows has no native support)
+- **nuclei container-first** (`sastNucleiImage`, default `projectdiscovery/nuclei:latest`, ships its own template library; avoids the Access-denied hang of sandboxed child processes writing config dirs), host binary only as a no-Docker fallback; container networking follows `sastNetwork` (default on)
+- **semgrep container fallback** (`sastSemgrepImage`, default `returntocorp/semgrep:latest`, mounting `/src:ro` read-only where Windows has no native support; targets outside the workspace are refused)
 - Rate limit defaults to `nucleiRateLimit: 50`/s — do not raise it for targets you do not own
 
 **Real output example**:
 
 ```
-nuclei scan via container (projectdiscovery/nuclei) (rate limit 50/s):
+nuclei scan via container (projectdiscovery/nuclei:latest, templates volume) (rate limit 50/s):
 [exit code: 0]
 Remember: these are template matches, not validated findings.
 ```
@@ -403,9 +408,9 @@ Remember: these are template matches, not validated findings.
 | `filter` / `limit` | list: substring filter over method/url/status; max rows shown, default 20 |
 | `id` | get/replay: flow id (`F-…`) |
 
-**Architecture**: `mitmdump` runs in the official `mitmproxy/mitmproxy` container (workspace mounted at `/workspace`, addon mounted read-only at `/addon.py`); `assets/mitmproxy/strix_addon.py` logs every completed flow as one summary line in `workspace/proxy/flows.jsonl` plus raw `flows/<id>.req` / `.rsp` messages. Replay re-sends through the shared `sendHttpRequest` (same fetch path and output format as strix_http).
+**Architecture**: `mitmdump` runs in the official `mitmproxy/mitmproxy` container (image configurable via `proxyImage`; workspace mounted at `/workspace`, addon mounted read-only at `/addon.py`); `assets/mitmproxy/strix_addon.py` logs every completed flow as one summary line in `workspace/proxy/flows.jsonl` plus raw `flows/<id>.req` / `.rsp` messages. Replay re-sends through the shared `sendHttpRequest` (same fetch path and output format as strix_http) — **and replayed writes run the same spray-guard** (pre-approval match, per-path counting, cap via the shared `evaluatePostPolicy`; the proxy cannot bypass it).
 
-**Honest limits**: HTTPS bodies need the client to trust the sidecar CA (`workspace/proxy/.mitmproxy/mitmproxy-ca-cert.pem`); without it only CONNECT metadata is captured and replay explicitly refuses ("has no replayable URL"). One sidecar per workspace at a time. stop has two paths: same-process pid kill + cross-process `docker stop` (pid dies with the headless process, the latter covers it — fixed after a real misprediction).
+**Honest limits**: HTTPS bodies need the client to trust the sidecar CA (`workspace/proxy/.mitmproxy/mitmproxy-ca-cert.pem`); without it only CONNECT metadata is captured and replay explicitly refuses ("has no replayable URL"). One sidecar per workspace at a time. stop has two paths: same-process pid kill (**only after the OS confirms the pid still belongs to a docker CLI** — sidecar.json lives in the model-writable workspace, so a forged pid never reaches `process.kill`) + cross-process `docker stop` (pid dies with the headless process, the latter covers it — fixed after a real misprediction).
 
 **SCOPE (honest difference from upstream Caido scope)**: upstream Caido filters targets with scope get/list/create/update/delete; this build has **no scope allow/deny lists** — one sidecar per workspace captures everything through the proxy port. The operator scopes the engagement by pointing only the authorized client at that port; the rule is written into the tool description so the model sees it on every call.
 
@@ -430,7 +435,7 @@ Sidecar stopped. 2 flow(s) remain queryable (list/get/replay).
 | `action` | check / kev-refresh / status |
 | `packages` | check: `[{ecosystem, name, version}]` (ecosystem e.g. npm/PyPI/Go/Maven; max 50 per call) |
 
-**Chain**: OSV `querybatch` primary (package+version → vuln ids) → `vulns/{id}` detail (summary/CVSS_V3/fixed versions/CVE aliases) → KEV cache hit (`workspace/vulndb/kev.json`, 24h TTL, auto-refreshed when missing/stale) → per-CVE EPSS scores → KEV hits first, EPSS desc. Results feed `strix_finding create vulnerability_type=dependency_cve` directly (`dedupe-check` keys on CVE + package). **Prove reachability before filing**: a vulnerable dependency is a lead.
+**Chain**: OSV `querybatch` primary (package+version → vuln ids) → `vulns/{id}` detail (summary/CVSS_V3/fixed versions/CVE aliases) → KEV cache hit (`workspace/vulndb/kev.json`, 24h TTL, auto-refreshed when missing/stale) → per-CVE EPSS scores → KEV hits first, EPSS desc. Results feed `strix_finding create vulnerability_type=dependency_cve` directly (`dedupe-check` keys on CVE + package). **Prove reachability before filing**: a vulnerable dependency is a lead. **Budget gate**: `check` fans out to 1+N+M network calls, so it consults the ledger like the other heavy tools (warn/block).
 
 **Real output** (headless, lodash@4.17.20):
 
@@ -446,7 +451,7 @@ Sidecar stopped. 2 flow(s) remain queryable (list/get/replay).
 
 ## strix_budget — LLM spend ledger
 
-**Background**: dsh's token-meter measures context pressure, not dollars, and alpha.5 has no pricing API — so this ledger prices usage with operator-configured per-1K rates (code defaults: DeepSeek V3.2 official, input $0.00027/1K, output $0.0004/1K; this machine's three profiles override to muse-spark-1.3-contributor via opencodego: input $0.0001/1K, output $0.0002/1K), accumulated in `workspace/budget.json`. The ledger is only as honest as its records: the agent faithfully `record`s its own per-turn usage. When dsh opens a usage subscription, recording can switch to automatic; the ledger format already allows for it.
+**Background**: dsh's token-meter measures context pressure, not dollars, and alpha.5 has no pricing API — so this ledger prices usage with operator-configured per-1K rates (code defaults: DeepSeek V3.2 official, input $0.00027/1K, output $0.0004/1K; this machine's three profiles override to muse-spark-1.3-contributor via opencodego: input $0.0001/1K, output $0.0002/1K), baseline in `workspace/budget.json` plus one line per `record` in the append-only `workspace/budget-records.jsonl` (concurrent turns never lose increments; read back as the aggregate). The ledger is only as honest as its records: the agent faithfully `record`s its own per-turn usage. When dsh opens a usage subscription, recording can switch to automatic; the ledger format already allows for it. `reset` zeroes the baseline, truncates the records file, and stamps an audit row in `evidence/log.jsonl`.
 
 | Parameter | Notes |
 |---|---|
@@ -476,15 +481,19 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | Config | Default | Affects |
 |---|---|---|
 | `workspaceDir` | `''` → `~/.dsh/strix-workspace` | All artifact roots |
-| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http (cap: per-path non-preapproved POST limit) |
+| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http (cap: per-path non-preapproved state-changing limit, append-only ledger `workspace/http-post-counts.jsonl`, legacy `.json` merged read-only; proxy POST replay shares the policy) |
 | `shellImage` / `shellNetwork` / `shellTimeoutMs` | python:3.12-slim / true / 120s | strix_shell |
-| `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox |
+| `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox (base packages merged with per-call `install_packages`) |
 | `binariesDir` | `''` | recon/sast binary discovery (`~/.dsh/bin` is always searched) |
 | `reconTimeoutMs` / `nucleiRateLimit` | 300s / 50 | strix_recon / strix_sast |
+| `sastNucleiImage` / `sastSemgrepImage` / `sastNetwork` | projectdiscovery/nuclei:latest / returntocorp/semgrep:latest / true | strix_sast container images and networking |
+| `sastExtraMountRoots` | `[]` | strix_sast: host roots outside the workspace that semgrep may scan |
+| `proxyImage` | mitmproxy/mitmproxy:latest | strix_proxy sidecar image |
 | `browserHeadless` | true | strix_browser |
+| `browserEnforcePostPolicy` | true | strix_browser automated spray-guard over browser-fired writes |
 | `strictEvidence` | true | strix_finding rejects evidence-less filings |
 | `approvalGate` | `'always'` | strix_shell / strix_pybox ask ApprovalService per call; `'off'` disables (unattended runs the operator accepts responsibility for only) |
-| `budgetLimitUsd` | `0` (uncapped) | strix_budget spend cap (USD); recon/sast consult the ledger, over-budget behavior follows budgetAction |
+| `budgetLimitUsd` | `0` (uncapped) | strix_budget spend cap (USD); recon/sast/depcheck/proxy consult the ledger, over-budget behavior follows budgetAction |
 | `budgetInputPer1k` / `budgetOutputPer1k` | `0.00027` / `0.0004` | Ledger pricing (code defaults are DeepSeek V3.2 official; this machine's profiles override to 0.0001/0.0002; change the profile overlay when switching models) |
 | `budgetAction` | `'warn'` | Over-budget heavy-tool behavior: `'warn'` prepends a warning and proceeds, `'block'` refuses |
 
@@ -494,7 +503,7 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 
 strix_shell and strix_pybox are the suite's only tools that execute arbitrary commands/code in containers, so they are bound to dsh's ApprovalService (`@deepseek-ai/dsh-user-approval`, since alpha.5) for per-call approval:
 
-1. Before executing, the tool first checks `approvalAutoAllow` pre-approval (regex list, default empty = no loosening): a summary matching any pattern runs immediately and is logged as `auto-allowed`. Only unmatched calls reach `ctx.approval.request({ agent, toolName, callId, reason, signal })`, where `reason` is a human-readable command summary (first 160 chars of the command / script first line + size + pip packages + network toggle). Typical pre-approval: read-only commands `^strix_shell: run "(echo|uname|whoami|id|ls|cat|head|tail|grep|jq)`.
+1. Before executing, the tool first checks `approvalAutoAllow` pre-approval (regex list, default empty = no loosening): patterns **always match the full text**, while the operator reads a truncated display (over 400 chars: cut + full length + sha256 stamp — a truncated view is never mistaken for the whole, so prefix patterns cannot be fooled by a payload past the cut). A match runs immediately and is logged as `auto-allowed`. Only unmatched calls reach `ctx.approval.request({ agent, toolName, callId, reason, signal })`, where `reason` is the truncated display including execution parameters (timeout, workdir). Typical pre-approval: read-only commands `^strix_shell: run "(echo|uname|whoami|id|ls|cat|head|tail|grep|jq)`.
 2. Four outcomes: `allowed-once` (the only grant), `rejected`, `cancelled`, `unavailable`. **Everything but the grant refuses execution** (matching dsh's fail-closed rule on `unavailable`).
 3. The service auto-appends the `approval/asked` + `approval/decided` audit pair to the session event log; the plugin additionally writes an **operator-side ledger** at `<workspace>/evidence/log.jsonl`:
 

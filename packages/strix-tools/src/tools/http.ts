@@ -8,7 +8,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
-import { safeWorkspacePath, truncate, workspaceDir, workspaceSub } from '../lib/util.js'
+import { clampTimeoutMs, safeWorkspacePath, truncate, workspaceDir, workspaceSub } from '../lib/util.js'
 import { isAuthorizationExpired, matchesPreApprovedPost, readAuthorization } from './authorization.js'
 
 interface HttpArgs {
@@ -157,6 +157,69 @@ export function bumpPostCount(config: ConfigType, path: string): number {
   return seen > 0 ? seen : 1
 }
 
+export type PostPolicyOutcome =
+  | { proceed: true; note: string }
+  | { proceed: false; rejection: string }
+
+/** Verbs that change server state and therefore go through the spray-guard. Reads (GET/HEAD/OPTIONS) are uncounted by design. */
+export const STATE_CHANGING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE']
+
+/**
+ * Shared state-changing-request spray-guard behind strix_http and
+ * strix_proxy replay, so a replayed write cannot bypass the counting,
+ * audit stamp, and per-path cap (Strix autonomy enabler, three branches):
+ * (a) pre-approved path+body in authorization.json → proceed, stamp the
+ *     clearance line (audit trail).
+ * (b) non-preapproved but a LIVE (unexpired) attestation exists → proceed,
+ *     stamp an audit line with the per-path count, and enforce
+ *     httpPostCapPerPath as the spray guard (over-cap refuses and points at
+ *     needs_follow_up + pre-approval).
+ * (c) no attestation → proceed exactly as before (send, no stamp).
+ *
+ * Covers POST, PUT, PATCH, and DELETE — the verbs that change server state.
+ * Counts are keyed by path across all four verbs (a spray is a spray
+ * whatever the verb), and pre-approval entries match exact path+body on any
+ * of them. GET/HEAD/OPTIONS stay uncounted by design (reads, not writes).
+ *
+ * Filesystem-touching (reads authorization.json, appends the counts ledger);
+ * unit-tested against a scratch workspace.
+ */
+export function evaluatePostPolicy(config: ConfigType, url: string, body: string, method = 'POST'): PostPolicyOutcome {
+  // Reads are uncounted by design — and gating here (not at call sites)
+  // means no caller can forget the check and silently bypass the guard.
+  if (!STATE_CHANGING_METHODS.includes(method.toUpperCase())) return { proceed: true, note: '' }
+  try {
+    const urlObj = new URL(url)
+    const auth = readAuthorization(config)
+    if (matchesPreApprovedPost(auth, urlObj.pathname, body)) {
+      return {
+        proceed: true,
+        note: `\n[pre-approved ${method} ${urlObj.pathname} — operator clearance in authorization.json, proceeded without asking]`,
+      }
+    }
+    if (auth && !isAuthorizationExpired(auth)) {
+      const cap = config.httpPostCapPerPath
+      const counts = readPostCounts(config)
+      const seen = counts[urlObj.pathname] ?? 0
+      if (cap > 0 && seen >= cap) {
+        return {
+          proceed: false,
+          rejection: `REJECTED: per-path state-changing cap reached for ${urlObj.pathname} (${seen}/${cap} non-preapproved sends already made under this attestation). `
+            + `Record a needs_follow_up coverage entry naming this path and ask the operator to pre-approve it (authorization.json pre_approved_post_paths) or raise the cap — do not retry with reworded bodies.`,
+        }
+      }
+      const n = bumpPostCount(config, urlObj.pathname)
+      return {
+        proceed: true,
+        note: `\n[non-preapproved ${method} ${urlObj.pathname} — live authorization (${auth.targets.join(', ')}), count ${n}/${cap > 0 ? cap : '∞'}, proceeded without asking]`,
+      }
+    }
+  } catch {
+    /* unparsable URL: no pre-approval match, proceed normally */
+  }
+  return { proceed: true, note: '' }
+}
+
 export interface SendHttpOptions {
   url: string
   method?: string
@@ -182,7 +245,7 @@ export async function sendHttpRequest(
   const body = opts.body
 
   const controller = new AbortController()
-  const timeoutMs = opts.timeoutMs ?? config.httpTimeoutMs
+  const timeoutMs = clampTimeoutMs(opts.timeoutMs, config.httpTimeoutMs)
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const started = Date.now()
 
@@ -247,8 +310,8 @@ export function registerHttp(ctx: Context, config: ConfigType) {
       description:
         'Send a raw HTTP request with full control (method, headers, body, or a complete raw request text) '
         + 'and inspect the response. The replay workflow from Strix: use it to reproduce and validate '
-        + 'suspected issues with concrete evidence. POSTs matching authorization.json pre_approved_post_paths '
-        + '(exact path + body) proceed WITHOUT asking — the clearance is stamped in the output. '
+        + 'suspected issues with concrete evidence. State-changing requests (POST/PUT/PATCH/DELETE) matching authorization.json pre_approved_post_paths '
+        + '(exact path + body) proceed WITHOUT asking — the clearance is stamped in the output; other writes count against the per-path cap. '
         + 'Only for authorized targets.',
       parameters: {
         url: { type: 'string', description: 'Target URL. Omit when raw_request includes an absolute request target.' },
@@ -281,35 +344,15 @@ export function registerHttp(ctx: Context, config: ConfigType) {
 
         const method = (parsed?.method ?? args.method ?? 'GET').toUpperCase()
         const body = parsed?.body ?? args.body ?? ''
-        // POST policy (Strix autonomy enabler, three branches):
-        // (a) pre-approved path+body in authorization.json → send, stamp the
-        //     clearance line (audit trail).
-        // (b) non-preapproved but a LIVE (unexpired) attestation exists → send
-        //     WITHOUT asking, stamp an audit line with the per-path count, and
-        //     enforce httpPostCapPerPath as the spray guard (over-cap refuses
-        //     and points at needs_follow_up + pre-approval).
-        // (c) no attestation → behave exactly as before (send, no stamp).
+        // State-changing policy: shared with strix_proxy replay
+        // (evaluatePostPolicy) — a replayed write must not bypass the
+        // counting, audit stamp, or cap. The verb check lives inside the
+        // helper so no call site can forget it.
         let postNote = ''
-        if (method === 'POST') {
-          try {
-            const urlObj = new URL(url)
-            const auth = readAuthorization(config)
-            if (matchesPreApprovedPost(auth, urlObj.pathname, body)) {
-              postNote = `\n[pre-approved POST ${urlObj.pathname} — operator clearance in authorization.json, proceeded without asking]`
-            } else if (auth && !isAuthorizationExpired(auth)) {
-              const cap = config.httpPostCapPerPath
-              const counts = readPostCounts(config)
-              const seen = counts[urlObj.pathname] ?? 0
-              if (cap > 0 && seen >= cap) {
-                return `REJECTED: per-path POST cap reached for ${urlObj.pathname} (${seen}/${cap} non-preapproved POSTs already sent under this attestation). `
-                  + `Record a needs_follow_up coverage entry naming this path and ask the operator to pre-approve it (authorization.json pre_approved_post_paths) or raise the cap — do not retry with reworded bodies.`
-              }
-              const n = bumpPostCount(config, urlObj.pathname)
-              postNote = `\n[non-preapproved POST ${urlObj.pathname} — live authorization (${auth.targets.join(', ')}), count ${n}/${cap > 0 ? cap : '∞'}, proceeded without asking]`
-            }
-          } catch {
-            /* unparsable URL: no pre-approval match, proceed normally */
-          }
+        {
+          const verdict = evaluatePostPolicy(config, url, body, method)
+          if (!verdict.proceed) return verdict.rejection
+          postNote = verdict.note
         }
         const sent = await sendHttpRequest(config, {
           url,

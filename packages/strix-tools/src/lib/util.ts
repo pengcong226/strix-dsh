@@ -3,8 +3,9 @@
  * subprocess execution with timeouts, and Docker invocation.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import type { ConfigType } from '../config.js'
 
@@ -103,6 +104,33 @@ export function isEexist(err: unknown): boolean {
 }
 
 /**
+ * Atomic whole-file write via tmp + rename: readers never observe a torn
+ * file, and a crash mid-write leaves the previous version intact (the tmp
+ * file is simply orphaned). This does NOT serialize concurrent writers —
+ * two simultaneous rewrites still last-writer-wins — it only guarantees
+ * each observed state is complete. Use for single-writer whole-file updates
+ * (finding update, report.md, threat-model save); use append-only JSONL for
+ * multi-writer event logs (coverage record, POST counts, budget records).
+ */
+export async function writeFileAtomic(file: string, data: string): Promise<void> {
+  const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`
+  writeFileSync(tmp, data, { encoding: 'utf8' })
+  const { renameSync } = await import('node:fs')
+  try {
+    renameSync(tmp, file)
+  } catch {
+    // Rename failed (e.g. cross-device): fall back to a direct write after
+    // best-effort tmp cleanup. Atomicity is lost but the write still lands.
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* ignore */
+    }
+    writeFileSync(file, data, { encoding: 'utf8' })
+  }
+}
+
+/**
  * Filesystem flavour of {@link nextIdAmong}: scans a workspace subdirectory
  * for `<prefix>NNN.json` files and returns the next free id. Used by
  * strix_finding (findings/) and strix_notes (notes/).
@@ -137,6 +165,18 @@ export function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   const cut = text.slice(0, maxChars)
   return `${cut}\n\n[... truncated: showing ${maxChars} of ${text.length} characters — full output saved to workspace when the tool supports save_to ...]`
+}
+
+/**
+ * Clamp a model-supplied timeout: non-numbers, NaN, and non-positive values
+ * fall back to the configured default (a negative setTimeout would fire
+ * immediately and fake a timeout); huge values are capped at `max`
+ * (default 1h) so one call cannot park a turn indefinitely. Pure — unit-tested.
+ */
+export function clampTimeoutMs(value: unknown, def: number, max = 3_600_000): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : def
+  if (n <= 0) return def
+  return Math.min(n, max)
 }
 
 export interface RunResult {
@@ -238,6 +278,30 @@ export function runProcess(
 }
 
 /**
+ * Best-effort `docker rm -f`: killing the local docker CLI does NOT stop the
+ * daemon-side container, so a timed-out or cancelled run must remove the
+ * container explicitly — otherwise a scan/attack keeps running against the
+ * target after the tool already reported "timed out". Never throws.
+ */
+export function dockerRmContainer(containerId: string): void {
+  try {
+    spawnSync('docker', ['rm', '-f', containerId], { windowsHide: true, timeout: 30_000 })
+  } catch {
+    /* best effort — worst case the operator cleans up via `docker ps` */
+  }
+}
+
+/** Read a docker --cidfile. Null when absent/empty (the CLI never got far enough to create a container). */
+export function readCidFile(cidFile: string): string | null {
+  try {
+    const cid = readFileSync(cidFile, 'utf8').trim()
+    return cid || null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Run a one-shot command inside a Docker container with the workspace mounted
  * at /workspace (read-write). Used by strix_shell and strix_pybox.
  */
@@ -254,11 +318,17 @@ export async function dockerRun(
     /** Skip the default workspace mount (e.g. when mounting a different dir). */
     skipWorkspaceMount?: boolean
   },
-): Promise<RunResult & { dockerMissing?: boolean }> {
+): Promise<RunResult & { dockerMissing?: boolean; containerRemoved?: boolean }> {
   const ws = workspaceDir(config)
+  // The cidfile binds the daemon-side container to this call: `docker run
+  // --rm` only cleans up on a clean CLI exit, so on timeout we `rm -f` the
+  // recorded id ourselves (see below). Written by the CLI on the host.
+  const cidFile = join(tmpdir(), `strix-cid-${process.pid}-${randomUUID()}.cid`)
   const args = [
     'run',
     '--rm',
+    '--cidfile',
+    cidFile,
     ...(!opts.skipWorkspaceMount ? ['-v', `${ws}:/workspace`] : []),
     ...(opts.extraVolumes ?? []),
     '-w',
@@ -268,13 +338,24 @@ export async function dockerRun(
     ...opts.command,
   ]
   const result = await runProcess('docker', args, { timeoutMs: opts.timeoutMs })
+  const containerId = readCidFile(cidFile)
+  try {
+    rmSync(cidFile, { force: true })
+  } catch {
+    /* marker cleanup is best effort */
+  }
+  let containerRemoved = false
+  if (result.timedOut && containerId) {
+    dockerRmContainer(containerId)
+    containerRemoved = true
+  }
   if (result.exitCode !== 0 && /docker.*(not recognized|not found|cannot find)/i.test(result.stderr)) {
-    return { ...result, dockerMissing: true }
+    return { ...result, dockerMissing: true, containerRemoved }
   }
   if (result.exitCode === 125 && /Cannot connect to the Docker daemon/is.test(result.stderr)) {
-    return { ...result, dockerMissing: true }
+    return { ...result, dockerMissing: true, containerRemoved }
   }
-  return result
+  return { ...result, containerRemoved }
 }
 
 /** Locate an engine binary: configured dir, then ~/.dsh/bin, then PATH. */

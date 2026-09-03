@@ -12,9 +12,10 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
+import { logEvidence } from '../lib/approval.js'
 import { workspaceDir } from '../lib/util.js'
 
 export interface BudgetLedger {
@@ -28,24 +29,65 @@ export interface BudgetLedger {
 }
 
 const FILE = 'budget.json'
+/** Append-only usage records: one line per `record`, so concurrent turns never lose increments. */
+const RECORDS_FILE = 'budget-records.jsonl'
 
 export function budgetPath(config: ConfigType): string {
   return join(workspaceDir(config), FILE)
 }
 
-/** Read the ledger, or a zero ledger when none exists yet. */
+function budgetRecordsPath(config: ConfigType): string {
+  return join(workspaceDir(config), RECORDS_FILE)
+}
+
+function zeroLedger(): BudgetLedger {
+  const now = new Date().toISOString()
+  return { inputTokens: 0, outputTokens: 0, spentUsd: 0, records: 0, started_at: now, updated_at: now }
+}
+
+/**
+ * Read the ledger: baseline file plus every appended record line.
+ * `reset` zeroes the baseline AND truncates the records file, so all
+ * surviving lines postdate the last reset. A torn line is skipped, never
+ * fatal. Concurrent records each append one line — no read-modify-write
+ * window, no lost increments (the previous JSON rewrite dropped them).
+ */
 export function readBudget(config: ConfigType): BudgetLedger {
+  let ledger = zeroLedger()
   const path = budgetPath(config)
-  if (!existsSync(path)) {
-    const now = new Date().toISOString()
-    return { inputTokens: 0, outputTokens: 0, spentUsd: 0, records: 0, started_at: now, updated_at: now }
+  if (existsSync(path)) {
+    try {
+      ledger = JSON.parse(readFileSync(path, 'utf8')) as BudgetLedger
+    } catch {
+      ledger = zeroLedger()
+    }
   }
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as BudgetLedger
-  } catch {
-    const now = new Date().toISOString()
-    return { inputTokens: 0, outputTokens: 0, spentUsd: 0, records: 0, started_at: now, updated_at: now }
+  const recordsFile = budgetRecordsPath(config)
+  if (existsSync(recordsFile)) {
+    let raw = ''
+    try {
+      raw = readFileSync(recordsFile, 'utf8')
+    } catch {
+      return ledger
+    }
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as { in?: unknown; out?: unknown; usd?: unknown }
+        const input = typeof r.in === 'number' && Number.isFinite(r.in) && r.in > 0 ? Math.floor(r.in) : 0
+        const output = typeof r.out === 'number' && Number.isFinite(r.out) && r.out > 0 ? Math.floor(r.out) : 0
+        const usd = typeof r.usd === 'number' && Number.isFinite(r.usd) && r.usd > 0 ? r.usd : 0
+        if (input === 0 && output === 0) continue
+        ledger.inputTokens += input
+        ledger.outputTokens += output
+        ledger.spentUsd += usd
+        ledger.records += 1
+      } catch {
+        /* skip the torn line */
+      }
+    }
   }
+  return ledger
 }
 
 function writeBudget(config: ConfigType, ledger: BudgetLedger): void {
@@ -98,7 +140,7 @@ export function registerBudget(ctx: Context, config: ConfigType) {
       name: 'strix_budget',
       description:
         'Engagement LLM spend ledger: record per-turn token usage (priced with the configured per-1K rates), '
-        + 'check remaining budget with status, or reset the ledger. Heavy tools (recon/sast) consult this ledger '
+        + 'check remaining budget with status, or reset the ledger. Heavy tools (recon/sast/depcheck/proxy) consult this ledger '
         + 'and warn or refuse once the cap is exceeded. Report usage honestly — the ledger is only as good as '
         + 'its records.',
       parameters: {
@@ -130,13 +172,16 @@ export function registerBudget(ctx: Context, config: ConfigType) {
           const input = Math.max(0, Math.floor(args.input_tokens ?? 0))
           const output = Math.max(0, Math.floor(args.output_tokens ?? 0))
           if (input === 0 && output === 0) return 'REJECTED: input_tokens or output_tokens (positive) is required for record.'
+          try {
+            appendFileSync(
+              budgetRecordsPath(config),
+              JSON.stringify({ ts: new Date().toISOString(), in: input, out: output, usd: priceUsage(config, input, output), note: args.note ?? '' }) + '\n',
+              'utf8',
+            )
+          } catch {
+            /* best-effort persistence; totals below are read back, not assumed */
+          }
           const ledger = readBudget(config)
-          ledger.inputTokens += input
-          ledger.outputTokens += output
-          ledger.spentUsd += priceUsage(config, input, output)
-          ledger.records += 1
-          ledger.updated_at = new Date().toISOString()
-          writeBudget(config, ledger)
           const over = checkBudget(config, 'strix_budget')
           const line = `Recorded +${input} in / +${output} out → total ${formatUsd(ledger.spentUsd)}`
             + (args.note ? ` (${args.note})` : '') + '.'
@@ -146,10 +191,24 @@ export function registerBudget(ctx: Context, config: ConfigType) {
         if (args.action === 'reset') {
           const now = new Date().toISOString()
           writeBudget(config, { inputTokens: 0, outputTokens: 0, spentUsd: 0, records: 0, started_at: now, updated_at: now })
-          return 'Budget ledger reset to zero. Past spend is discarded — the operator owns that decision.'
+          try {
+            writeFileSync(budgetRecordsPath(config), '', 'utf8')
+          } catch {
+            /* baseline is already zeroed; a stale records file is additive noise the operator can clear by hand */
+          }
+          // Reset destroys audit data: stamp the evidence ledger so the
+          // decision survives (the finish tool guards destruction with
+          // caller_role=root; reset keeps its open call but is now audited).
+          logEvidence(config, {
+            ts: now,
+            kind: 'decision',
+            tool: 'strix_budget',
+            outcome: 'reset',
+          })
+          return 'Budget ledger reset to zero. Past spend is discarded — the operator owns that decision (audited in evidence/log.jsonl).'
         }
 
-        return `Unknown action "${args.action}". Use record | status | reset.`
+        return `REJECTED: unknown action "${args.action}". Use record | status | reset.`
       },
     }),
   )

@@ -11,6 +11,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
+import { evaluatePostPolicy, STATE_CHANGING_METHODS } from './http.js'
 import { safeId, truncate, workspaceSub } from '../lib/util.js'
 
 // Minimal structural types to avoid a hard dependency at build time.
@@ -21,7 +22,59 @@ interface PageLike {
   evaluate<T>(fn: string): Promise<T>
   content(): Promise<string>
   screenshot(opts?: { path?: string; fullPage?: boolean }): Promise<unknown>
+  route(pattern: string, handler: (route: GuardedRoute) => Promise<void>): Promise<unknown>
   close(): Promise<unknown>
+}
+/** Structural half of a Playwright route: only what the guard touches. */
+export interface GuardedRequest {
+  method(): string
+  url(): string
+  postData(): string | null | undefined
+}
+export interface GuardedRoute {
+  request(): GuardedRequest
+  continue(): Promise<unknown>
+  abort(): Promise<unknown>
+}
+
+/**
+ * Automated spray-guard for browser-initiated traffic: every request the
+ * page fires goes through the SAME policy as strix_http and proxy replay
+ * (pre-approval match, per-path counting, cap) with NO human in the loop.
+ * Reads take a fast path (no ledger touch); rejected writes are aborted
+ * before they leave, and the verdict lands in `notes` for the action's
+ * return text. A guard failure on a write blocks fail-closed — never a
+ * silent bypass. Pure logic over scratch workspaces — unit-tested with fake
+ * routes (no playwright needed).
+ */
+export function createSprayGuardHandler(config: ConfigType, notes: string[]): (route: GuardedRoute) => Promise<void> {
+  return async (route) => {
+    const req = route.request()
+    let method = 'GET'
+    try {
+      method = req.method().toUpperCase()
+    } catch {
+      await route.continue().catch(() => {})
+      return
+    }
+    if (!STATE_CHANGING_METHODS.includes(method)) {
+      await route.continue().catch(() => {})
+      return
+    }
+    try {
+      const verdict = evaluatePostPolicy(config, req.url(), req.postData() ?? '', method)
+      if (verdict.proceed) {
+        if (verdict.note.trim()) notes.push(verdict.note.trim())
+        await route.continue().catch(() => {})
+      } else {
+        notes.push(verdict.rejection)
+        await route.abort().catch(() => {})
+      }
+    } catch {
+      notes.push(`REJECTED: browser spray-guard error on ${method} — write blocked fail-closed, nothing was sent.`)
+      await route.abort().catch(() => {})
+    }
+  }
 }
 interface BrowserLike {
   newPage(): Promise<PageLike>
@@ -68,6 +121,9 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
         'session per agent/task so concurrent navigation does not invalidate each other\u2019s pages. Session ' +
         'names are plain identifiers (letters/digits/dash/underscore/dot); screenshot files derive from them. ' +
         'Sessions live in this plugin process — parallel engagements sharing one process must use distinct names. ' +
+        'Every page carries the automated spray-guard: browser-fired writes (form submits, XHR/fetch from evaluate) ' +
+        'go through the same pre-approval/cap policy as strix_http with no human involved — over-cap writes are ' +
+        'aborted before they leave and stamped into the action result. ' +
         'Close sessions when done. Only against authorized targets.',
       parameters: {
         action: { type: 'string', required: true, description: 'navigate | click | fill | evaluate | screenshot | content | close' },
@@ -103,28 +159,41 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
         }
 
         const page = await browser.newPage()
+        // Automated enforcement, no human: intercept every request the page
+        // fires and run writes through the shared spray-guard. Reads take a
+        // fast path; the verdicts accumulate into guardNotes below.
+        const guardNotes: string[] = []
+        const withNotes = (text: string): string =>
+          guardNotes.length > 0 ? `${text}\n${guardNotes.join('\n')}` : text
+        if (config.browserEnforcePostPolicy) {
+          try {
+            await page.route('**/*', createSprayGuardHandler(config, guardNotes))
+          } catch {
+            guardNotes.push('Warning: browser spray-guard route could not attach — writes on this page are uncounted.')
+          }
+        }
         try {
           switch (args.action) {
             case 'navigate': {
               if (!args.url) return 'REJECTED: url is required for navigate.'
               await page.goto(args.url, { waitUntil: args.wait_until ?? 'load', timeout: 30_000 })
               const title = await page.evaluate('document.title')
-              return `Navigated ${args.url} — title: ${title}`
+              return withNotes(`Navigated ${args.url} — title: ${title}`)
             }
             case 'click': {
               if (!args.selector) return 'REJECTED: selector is required for click.'
               await page.click(args.selector, { timeout: 10_000 })
-              return `Clicked ${args.selector}.`
+              return withNotes(`Clicked ${args.selector}.`)
             }
             case 'fill': {
               if (!args.selector || args.value === undefined) return 'REJECTED: selector and value are required for fill.'
               await page.fill(args.selector, args.value, { timeout: 10_000 })
-              return `Filled ${args.selector}.`
+              return withNotes(`Filled ${args.selector}.`)
             }
             case 'evaluate': {
               if (!args.value) return 'REJECTED: value (JS expression) is required for evaluate.'
               const result = await page.evaluate<unknown>(args.value)
-              return truncate(typeof result === 'string' ? result : JSON.stringify(result, null, 2), 10_000)
+              return withNotes(truncate(typeof result === 'string' ? result : JSON.stringify(result, null, 2), 10_000))
             }
             case 'screenshot': {
               const dir = workspaceSub(config, 'screenshots')

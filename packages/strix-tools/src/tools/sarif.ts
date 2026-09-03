@@ -19,7 +19,7 @@
  * Pure builders + one file writer. No LLM, no network, no Docker — safe in CI.
  * (Upstream's LLM dedupe judge and schema-validation step are out of scope.)
  */
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { workspaceDir } from '../lib/util.js'
@@ -28,7 +28,23 @@ import type { Finding } from './finding.js'
 
 export const SARIF_VERSION = '2.1.0'
 export const SARIF_SCHEMA = 'https://json.schemastore.org/sarif-2.1.0.json'
-export const STRIX_DH_VERSION = '0.8.0'
+/** Fallback when package.json is unreadable (tests, exotic bundling). */
+export const STRIX_DH_VERSION_FALLBACK = '0.8.0'
+/**
+ * Bundle version from the package manifest (dist/../package.json at
+ * runtime, src/../../package.json under vitest) — never a hardcoded
+ * constant that drifts from package.json.
+ */
+export function strixDhVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+    ) as { version?: unknown }
+    return typeof pkg.version === 'string' && pkg.version ? pkg.version : STRIX_DH_VERSION_FALLBACK
+  } catch {
+    return STRIX_DH_VERSION_FALLBACK
+  }
+}
 export const SARIF_FILENAME = 'findings.sarif'
 /** Synthetic anchor for DAST findings that have no source file. */
 export const SYNTHETIC_ANCHOR = 'SECURITY.md'
@@ -212,7 +228,7 @@ export function buildSarifDocument(findings: Finding[], coverage: CoverageEntry[
         tool: {
           driver: {
             name: 'StriX-DH',
-            version: STRIX_DH_VERSION,
+            version: strixDhVersion(),
             informationUri: 'https://github.com/deepseek-ai/deepseek-harness',
             rules,
           },

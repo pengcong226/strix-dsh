@@ -9,36 +9,77 @@ import { spawnSync } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync } from 'node:fs'
-import { dirname, isAbsolute } from 'node:path'
+import { dirname, isAbsolute, resolve, sep } from 'node:path'
 import type { ConfigType } from '../config.js'
+import { readAuthorization, targetCoveredByAuth } from './authorization.js'
 import { checkBudget } from './budget.js'
-import { dockerRun, findBinary, formatRunResult, runProcess, type RunResult } from '../lib/util.js'
+import { clampTimeoutMs, dockerRun, findBinary, formatRunResult, runProcess, workspaceDir, type RunResult } from '../lib/util.js'
 
 const NUCLEI_SEVERITIES = new Set(['info', 'low', 'medium', 'high', 'critical', 'unknown'])
 
 /**
- * Flags that would let a call escape the tool's contract: retargeting the
- * scan off the authorized target, disabling the rate limiter / raising
+ * Flags that would let a nuclei call escape the tool's contract: retargeting
+ * the scan off the authorized target, disabling the rate limiter / raising
  * concurrency, or changing engine behavior via config/update switches.
  * Everything else stays open — template selection (-t/-tags/-severity),
  * output formatting (-o/-json/-sarif, container-local and discarded with
  * --rm), and proxy routing are normal pentest operation on an authorized
  * target, and blocking them only taxes the model. Pure — unit-tested.
  */
-const BLOCKED_EXTRA_FLAGS = new Set([
-  '-u', '-target', '-l', '-list', '-resume',
-  '-rl', '-rate-limit', '-c', '-concurrency', '-bulk-size', '-headless',
-  '-config', '-rc', '-update', '-update-templates', '-disable-update-check',
-  '-duc', '-disable-clustering', '-uncover', '-expose',
+const NUCLEI_BLOCKED_EXTRA_FLAGS = new Set([
+  'u', 'target', 'l', 'list', 'resume',
+  'rl', 'rate-limit', 'c', 'concurrency', 'bulk-size', 'headless',
+  'config', 'rc', 'update', 'update-templates', 'disable-update-check',
+  'duc', 'disable-clustering', 'uncover', 'expose',
 ])
 
-export function checkExtraArgs(extra: string[]): string | null {
+/**
+ * Separate table for semgrep: its `-l/--lang` is a legitimate language
+ * selector (the shared nuclei table would mis-block it), while its own
+ * exfiltration surface is remote rulesets, metrics, and uploads. Exported
+ * for regression tests.
+ */
+export const SEMGREP_BLOCKED_EXTRA_FLAGS = new Set([
+  'config', 'remote', 'metrics', 'upload', 'gitlab', 'github', 'pro',
+])
+
+/** Normalize one extra_args token to its flag stem: lowercase, no leading dashes, value after `=` dropped. */
+function flagStem(token: string): string {
+  return token.toLowerCase().replace(/^-+/, '').split('=')[0] ?? ''
+}
+
+export function checkExtraArgs(extra: string[], blocked: Set<string> = NUCLEI_BLOCKED_EXTRA_FLAGS): string | null {
   for (const token of extra) {
-    if (BLOCKED_EXTRA_FLAGS.has(token.toLowerCase())) {
+    const stem = flagStem(token)
+    if (blocked.has(stem)) {
+      return `REJECTED: extra_args flag "${token}" is not allowed (scan target, rate-limit/concurrency, and engine config/update switches are fixed by the tool).`
+    }
+    // Attached short value forms (`-rl100`, `-c5`) dodge the exact/stem
+    // match — but only where the table actually holds those value flags.
+    if (/^(rl|c)\d/.test(stem) && (blocked.has('rl') || blocked.has('c'))) {
       return `REJECTED: extra_args flag "${token}" is not allowed (scan target, rate-limit/concurrency, and engine config/update switches are fixed by the tool).`
     }
   }
   return null
+}
+
+/**
+ * Is a semgrep target inside the engagement workspace (or an operator-listed
+ * `sastExtraMountRoots` entry)? The container fallback mounts the host
+ * directory, so an unconstrained absolute path would expose arbitrary host
+ * trees to the container — and via extra_args, to the network. Pure
+ * filesystem check — unit-tested.
+ */
+export function semgrepTargetAllowed(config: ConfigType, target: string): boolean {
+  // resolve() first: join() keeps `..` segments lexically, so a raw
+  // startsWith check would mistake `<ws>/../other` for "inside".
+  const abs = resolve(target)
+  const roots = [workspaceDir(config), ...(config.sastExtraMountRoots ?? [])]
+  return roots.some((root) => {
+    if (!root.trim()) return false
+    const base = resolve(root)
+    return abs === base || abs.startsWith(base + sep)
+  })
 }
 
 /** Named volume holding nuclei templates across `--rm` scans (backlog A-1). */
@@ -78,7 +119,7 @@ export function registerSast(ctx: Context, config: ConfigType) {
         const gate = checkBudget(config, 'strix_sast')
         if (gate.over && config.budgetAction === 'block') return gate.message
         const warnPrefix = gate.over ? gate.message + '\n' : ''
-        const timeoutMs = args.timeout_ms ?? config.reconTimeoutMs
+        const timeoutMs = clampTimeoutMs(args.timeout_ms, config.reconTimeoutMs)
 
         if (args.engine === 'nuclei') {
           const extra = (args.extra_args ?? '').split(' ').filter(Boolean)
@@ -88,6 +129,14 @@ export function registerSast(ctx: Context, config: ConfigType) {
           const badSeverity = severity.split(',').map((s) => s.trim().toLowerCase()).filter((s) => s && !NUCLEI_SEVERITIES.has(s))
           if (badSeverity.length > 0) {
             return `REJECTED: unknown nuclei severity value(s): ${badSeverity.join(', ')}. Use info, low, medium, high, critical, unknown.`
+          }
+          // Active scan: the target is an http(s) URL inside the live
+          // attestation — description text alone never authorizes traffic.
+          if (!/^https?:\/\//i.test(args.target)) {
+            return `REJECTED: nuclei target must be an http(s) URL, got "${args.target}".`
+          }
+          if (!targetCoveredByAuth(readAuthorization(config), args.target)) {
+            return `REJECTED: target "${args.target}" is not covered by a live authorization. Record one with strix_authorization (action=set) naming this target first.`
           }
           // Container first: the projectdiscovery/nuclei image ships its own
           // template library and avoids Windows config-dir write failures in
@@ -105,7 +154,7 @@ export function registerSast(ctx: Context, config: ConfigType) {
           if (docker) {
             ensureNucleiTemplateVolume()
             result = await dockerRun(config, {
-              image: 'projectdiscovery/nuclei',
+              image: config.sastNucleiImage,
               command: [
                 '-target',
                 args.target,
@@ -118,11 +167,11 @@ export function registerSast(ctx: Context, config: ConfigType) {
                 ...extra,
               ],
               timeoutMs,
-              network: true,
+              network: config.sastNetwork,
               workdir: '/workspace',
               extraVolumes: ['-v', `${NUCLEI_TEMPLATE_VOLUME}:/root/nuclei-templates`],
             })
-            via = 'container (projectdiscovery/nuclei, templates volume)'
+            via = `container (${config.sastNucleiImage}, templates volume)`
           } else if (hostBin) {
             result = await runProcess(
               hostBin,
@@ -150,8 +199,15 @@ export function registerSast(ctx: Context, config: ConfigType) {
 
         if (args.engine === 'semgrep') {
           const extra = (args.extra_args ?? '').split(' ').filter(Boolean)
-          const extraRejection = checkExtraArgs(extra)
+          const extraRejection = checkExtraArgs(extra, SEMGREP_BLOCKED_EXTRA_FLAGS)
           if (extraRejection) return extraRejection
+          // The target becomes a container mount (or a host-binary scan
+          // root): it must live under the engagement workspace or an
+          // operator-listed sastExtraMountRoots entry — never an arbitrary
+          // host path — and the mount is read-only.
+          if (!semgrepTargetAllowed(config, args.target)) {
+            return `REJECTED: semgrep target "${args.target}" is outside the engagement workspace. Scan a copy inside the workspace, or ask the operator to list its root in sastExtraMountRoots.`
+          }
           let result: RunResult
 
           const bin = findBinary(config, 'semgrep')
@@ -164,13 +220,13 @@ export function registerSast(ctx: Context, config: ConfigType) {
             const hostDir = dirname(args.target)
             const mounted = args.target.split(/[\\/]/).pop() ?? 'src'
             result = await dockerRun(config, {
-              image: 'returntocorp/semgrep',
+              image: config.sastSemgrepImage,
               command: ['semgrep', 'scan', '--config', 'auto', '--quiet', `./${mounted}`, ...extra],
               timeoutMs,
-              network: true,
+              network: config.sastNetwork,
               workdir: '/src',
               skipWorkspaceMount: true,
-              extraVolumes: ['-v', `${hostDir.split('\\').join('/')}:/src`],
+              extraVolumes: ['-v', `${hostDir.split('\\').join('/')}:/src:ro`],
             })
           } else {
             return 'semgrep not found on host. Install it (pip install semgrep), set binariesDir, or pass an '
@@ -180,7 +236,7 @@ export function registerSast(ctx: Context, config: ConfigType) {
             + 'Remember: static analysis is a lead — trace it, then validate dynamically where possible.'
         }
 
-        return `Unknown engine "${args.engine}". Use nuclei | semgrep.`
+        return `REJECTED: unknown engine "${args.engine}". Use nuclei | semgrep.`
       },
     }),
   )

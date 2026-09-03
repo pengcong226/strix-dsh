@@ -14,6 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 // Side-effect type import: pulls in the Context `approval` augmentation.
 import type {} from '@deepseek-ai/dsh-user-approval'
+import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
@@ -66,24 +67,60 @@ export function matchesAutoAllow(patterns: string[], summary: string): boolean {
 }
 
 /**
+ * An approval text split in two: `display` is what the operator reads (and
+ * what lands in the evidence ledger) — bounded, hash-stamped when truncated
+ * so a shortened view is never mistaken for the whole; `match` is the FULL
+ * text that pre-approved patterns match against. Never match patterns
+ * against a truncated string: a `^prefix` pattern would otherwise grant on
+ * an invisible suffix. Pure — unit-tested.
+ */
+export interface ApprovalSummary {
+  display: string
+  match: string
+}
+
+export function splitApprovalSummary(full: string, maxDisplayChars = 400): ApprovalSummary {
+  const digest = createHash('sha256').update(full, 'utf8').digest('hex').slice(0, 12)
+  if (full.length <= maxDisplayChars) return { display: full, match: full }
+  return {
+    display: `${truncate(full, maxDisplayChars)} [full ${full.length} chars, sha256:${digest}]`,
+    match: full,
+  }
+}
+
+/**
  * Build the gate used by registerShell/registerPybox. Closing over ctx and
  * config keeps tool bodies free of approval plumbing.
  */
 export function createApprovalGate(ctx: Context, config: ConfigType) {
   return async function requestRunApproval(
     exec: ToolRunContext,
-    summary: string,
+    summary: string | ApprovalSummary,
   ): Promise<GateDecision> {
-    if (config.approvalGate === 'off') return { granted: true }
+    const display = typeof summary === 'string' ? summary : summary.display
+    // Pre-approved patterns ALWAYS match the full text, never the display
+    // truncation (see splitApprovalSummary).
+    const match = typeof summary === 'string' ? summary : summary.match
+    if (config.approvalGate === 'off') {
+      logEvidence(config, {
+        ts: new Date().toISOString(),
+        kind: 'decision',
+        tool: exec.name,
+        outcome: 'gate-off',
+        callId: exec.callId,
+        command: truncate(display, 200),
+      })
+      return { granted: true }
+    }
 
-    if (matchesAutoAllow(config.approvalAutoAllow ?? [], summary)) {
+    if (matchesAutoAllow(config.approvalAutoAllow ?? [], match)) {
       logEvidence(config, {
         ts: new Date().toISOString(),
         kind: 'decision',
         tool: exec.name,
         outcome: 'auto-allowed',
         callId: exec.callId,
-        command: truncate(summary, 200),
+        command: truncate(display, 200),
       })
       return { granted: true }
     }
@@ -98,7 +135,7 @@ export function createApprovalGate(ctx: Context, config: ConfigType) {
         agent: exec.agent,
         toolName: exec.name,
         callId: exec.callId,
-        reason: summary,
+        reason: display,
         signal: exec.signal,
       })
     } catch (err) {
@@ -108,7 +145,7 @@ export function createApprovalGate(ctx: Context, config: ConfigType) {
         tool: exec.name,
         outcome: 'unavailable',
         callId: exec.callId,
-        command: truncate(summary, 200),
+        command: truncate(display, 200),
       })
       return denied('unavailable', exec.name, err instanceof Error ? err.message : String(err))
     }
@@ -119,7 +156,7 @@ export function createApprovalGate(ctx: Context, config: ConfigType) {
       tool: exec.name,
       outcome,
       callId: exec.callId,
-      command: truncate(summary, 200),
+      command: truncate(display, 200),
     })
 
     if (outcome === 'allowed-once') return { granted: true }

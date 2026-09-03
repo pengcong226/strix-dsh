@@ -10,7 +10,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
-import { nextIdAmong, nextSequentialId, safeId, workspaceDir, workspaceSub, writeExclusive } from '../lib/util.js'
+import { nextIdAmong, nextSequentialId, safeId, workspaceDir, workspaceSub, writeExclusive, writeFileAtomic } from '../lib/util.js'
 import { maskTestAccount, readAuthorization } from './authorization.js'
 import { readLedger } from './coverage.js'
 import { writeSarifReport } from './sarif.js'
@@ -57,10 +57,17 @@ function findingsDir(config: ConfigType): string {
 export function listFindings(config: ConfigType): Finding[] {
   const dir = findingsDir(config)
   if (!existsSync(dir)) return []
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.json'))
-    .sort()
-    .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as Finding)
+  const out: Finding[] = []
+  for (const f of readdirSync(dir).filter((name) => name.endsWith('.json')).sort()) {
+    // Fail-soft: one corrupt file must not take down read-only callers
+    // (notably strix_runs, which lists the whole engagement through here).
+    try {
+      out.push(JSON.parse(readFileSync(join(dir, f), 'utf8')) as Finding)
+    } catch {
+      /* skip the corrupt file; the rest of the registry still reads */
+    }
+  }
+  return out
 }
 
 /**
@@ -191,6 +198,9 @@ export function validateFinding(args: Record<string, unknown>, strict: boolean):
   if (args.vulnerability_type && !VULN_TYPES.includes(args.vulnerability_type as (typeof VULN_TYPES)[number])) {
     return `REJECTED: vulnerability_type must be one of ${VULN_TYPES.join(', ')}`
   }
+  if (args.confidence && !CONFIDENCES.includes(args.confidence as (typeof CONFIDENCES)[number])) {
+    return `REJECTED: confidence must be one of ${CONFIDENCES.join(', ')}`
+  }
   return null
 }
 
@@ -227,7 +237,11 @@ export function registerFinding(ctx: Context, config: ConfigType) {
         confidence: { type: 'string', description: 'high | medium | low — honest assessment; static-only trace is at best medium.' },
         poc_script: { type: 'string', description: 'Path to a saved PoC script (workspace-relative).' },
         remediation: { type: 'string', description: 'How to fix it.' },
-        code_locations: { type: 'object', additionalProperties: true, description: 'White-box inline fix: array of {file, fix_before, fix_after}.' },
+        code_locations: {
+          type: 'array',
+          items: { type: 'object', additionalProperties: true },
+          description: 'White-box inline fix: array of {file, fix_before, fix_after}.',
+        },
         fix_pr_body: { type: 'string', description: 'White-box: PR description for the inline fix.' },
         update_reason: { type: 'string', description: 'Why this finding is being updated (update action).' },
         package_name: { type: 'string', description: 'dedupe-check (dependency_cve): package name.' },
@@ -314,6 +328,9 @@ export function registerFinding(ctx: Context, config: ConfigType) {
           if (args.vulnerability_type !== undefined && !VULN_TYPES.includes(args.vulnerability_type as (typeof VULN_TYPES)[number])) {
             return `REJECTED: vulnerability_type must be one of ${VULN_TYPES.join(', ')}.`
           }
+          if (args.confidence !== undefined && !CONFIDENCES.includes(args.confidence as (typeof CONFIDENCES)[number])) {
+            return `REJECTED: confidence must be one of ${CONFIDENCES.join(', ')}.`
+          }
           // Strict mode also covers updates: a confirmed finding must not be
           // quietly downgraded to evidence-less. Explicitly passing an empty
           // evidence is a downgrade; not passing it at all is fine.
@@ -330,7 +347,11 @@ export function registerFinding(ctx: Context, config: ConfigType) {
             ...(existing.update_history ?? []),
             `${new Date().toISOString()}: ${String(args.update_reason ?? '(no reason given)')}`,
           ]
-          writeFileSync(file, JSON.stringify(existing, null, 2), 'utf8')
+          // Atomic rewrite: readers never see a torn finding. Concurrent
+          // updates to the SAME finding are still last-writer-wins (with both
+          // reasons preserved only in the winner's history) — re-get before
+          // editing when another agent may be writing.
+          await writeFileAtomic(file, JSON.stringify(existing, null, 2))
           return `Updated ${id}. Reason recorded: ${String(args.update_reason ?? '(no reason given)')}`
         }
 
@@ -354,7 +375,7 @@ export function registerFinding(ctx: Context, config: ConfigType) {
             : `NOT A DUPLICATE: ${verdict.reason} Safe to file with create.`
         }
 
-        return `Unknown action "${args.action}". Use create | update | list | get | dedupe-check.`
+        return `REJECTED: unknown action "${args.action}". Use create | update | list | get | dedupe-check.`
       },
     }),
   )
@@ -383,6 +404,12 @@ export function authorizationSummary(config: ConfigType): string[] {
   }
   return lines
 }
+
+/**
+ * Marker heading of the finish close-section in report.md. finish refuses to
+ * append a second one, and report regeneration preserves the existing one.
+ */
+export const CLOSE_MARKER = '## Engagement Close (finish)'
 
 /**
  * Validate the four required finish sections. Pure — unit-tested.
@@ -459,7 +486,7 @@ export function registerReport(ctx: Context, config: ConfigType) {
             '',
             '---',
             '',
-            '## Engagement Close (finish)',
+            CLOSE_MARKER,
             '',
             `Closed: ${new Date().toISOString()}`,
             '',
@@ -482,7 +509,14 @@ export function registerReport(ctx: Context, config: ConfigType) {
           if (!existsSync(reportPath)) {
             return 'REJECTED: no report.md yet — run action=report first, then finish appends the closing sections.'
           }
-          writeFileSync(reportPath, `${readFileSync(reportPath, 'utf8')}\n${closing}`, 'utf8')
+          const previous = readFileSync(reportPath, 'utf8')
+          // Idempotent close: a second finish must not stack another Close
+          // section — amend report.md by hand instead.
+          if (previous.includes(CLOSE_MARKER)) {
+            return 'REJECTED: this engagement is already closed (report.md has an Engagement Close section). '
+              + 'Amend report.md directly if the close needs changes — finish appends exactly once.'
+          }
+          writeFileSync(reportPath, `${previous}\n${closing}`, 'utf8')
           return `Engagement closed: four executive sections appended to ${reportPath} (${findings.length} findings).`
         }
         if (args.action !== undefined && args.action !== 'report') {
@@ -490,16 +524,12 @@ export function registerReport(ctx: Context, config: ConfigType) {
         }
         let coverageLines: string[] = []
         let ruledOutCount = 0
-        const coverageFile = join(workspaceSub(config, 'coverage'), 'ledger.jsonl')
-        if (existsSync(coverageFile)) {
-          const parsed = readFileSync(coverageFile, 'utf8')
-            .split('\n')
-            .filter((l) => l.trim())
-            .map((l) => JSON.parse(l) as Record<string, string>)
-          ruledOutCount = parsed.filter((e) => e.outcome === 'ruled_out').length
-          coverageLines = parsed
-            .map((e) => `- ${e.surface} — ${e.risk_area}: ${e.outcome}${e.evidence_note ? ` (${e.evidence_note})` : ''}`)
-        }
+        // Shared fail-soft reader: a torn ledger line degrades to "skipped",
+        // never to a crashed report.
+        const coverageEntries = readLedger(config)
+        ruledOutCount = coverageEntries.filter((e) => e.outcome === 'ruled_out').length
+        coverageLines = coverageEntries
+          .map((e) => `- ${e.surface} — ${e.risk_area}: ${e.outcome}${e.evidence_note ? ` (${e.evidence_note})` : ''}`)
 
         const counts = severityCounts(findings)
         const summary = Object.entries(counts).map(([s, n]) => `${n} ${s}`).join(', ') || 'none'
@@ -572,7 +602,15 @@ export function registerReport(ctx: Context, config: ConfigType) {
         // `out.filter((l) => l !== '')`) collapses every paragraph break, so
         // a list swallows the following description as a lazy continuation
         // and the `---` rule becomes a setext H2.
-        writeFileSync(reportPath, out.join('\n') + '\n', 'utf8')
+        // A report regenerated AFTER finish keeps the existing Close section:
+        // without this, report→finish→report silently un-closes the engagement.
+        let preservedClose = ''
+        if (existsSync(reportPath)) {
+          const previous = readFileSync(reportPath, 'utf8')
+          const at = previous.indexOf(CLOSE_MARKER)
+          if (at !== -1) preservedClose = `\n${previous.slice(at).trimEnd()}\n`
+        }
+        await writeFileAtomic(reportPath, `${out.join('\n')}\n${preservedClose}`)
         return `Report written to ${reportPath} (${findings.length} findings, ${coverageLines.length} coverage entries).`
       },
     }),

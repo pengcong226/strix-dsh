@@ -11,9 +11,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ConfigType } from '../config.js'
-import { createApprovalGate, logEvidence } from '../lib/approval.js'
-import { startBackgroundShell } from '../lib/jobs.js'
-import { dockerRun, formatRunResult, truncate } from '../lib/util.js'
+import { createApprovalGate, logEvidence, splitApprovalSummary } from '../lib/approval.js'
+import { newCidFile, startBackgroundShell } from '../lib/jobs.js'
+import { clampTimeoutMs, dockerRun, formatRunResult } from '../lib/util.js'
 
 export function registerShell(ctx: Context, config: ConfigType) {
   const requestApproval = createApprovalGate(ctx, config)
@@ -52,10 +52,15 @@ export function registerShell(ctx: Context, config: ConfigType) {
             + 'and shellAllowedImages. Ask the operator to allowlist the image, or run attended.'
         }
         const network = args.network ?? config.shellNetwork
-        const timeoutMs = args.timeout_ms ?? config.shellTimeoutMs
+        const timeoutMs = clampTimeoutMs(args.timeout_ms, config.shellTimeoutMs)
+        // Match on the FULL command, display truncated+hash-stamped: a
+        // prefix-type auto-allow must never grant on an invisible suffix.
         const gate = await requestApproval(
           exec,
-          `strix_shell${args.background ? ' (background job)' : ''}: run "${truncate(args.command, 160)}" in ${image} (network: ${network ? 'on' : 'off'})`,
+          splitApprovalSummary(
+            `strix_shell${args.background ? ' (background job)' : ''}: run "${args.command}" in ${image} `
+            + `(network: ${network ? 'on' : 'off'}, timeout: ${timeoutMs}ms, workdir: ${args.workdir ?? '/workspace'})`,
+          ),
         )
         if (!gate.granted) return gate.message
 
@@ -67,6 +72,7 @@ export function registerShell(ctx: Context, config: ConfigType) {
             workdir: args.workdir,
             timeoutMs,
             callId: exec.callId,
+            cidFile: newCidFile(),
           })
           logEvidence(config, {
             ts: new Date().toISOString(),
@@ -98,7 +104,10 @@ export function registerShell(ctx: Context, config: ConfigType) {
         if (result.dockerMissing) {
           return 'Docker is unavailable: install Docker Desktop (or start the daemon) to use strix_shell/strix_pybox/strix browser-backed flows. Install docs: https://www.docker.com/products/docker-desktop/'
         }
-        return formatRunResult(result, 20_000)
+        const text = formatRunResult(result, 20_000)
+        // Honest accounting: killing the local CLI does not stop the daemon
+        // container, so a timed-out run is `rm -f`'d — say so explicitly.
+        return result.containerRemoved ? `${text}\n[container removed after timeout — no residual workload]` : text
       },
     }),
   )

@@ -14,16 +14,16 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ConfigType } from '../config.js'
 import { checkBudget } from './budget.js'
 import { truncate, workspaceSub } from '../lib/util.js'
-import { parseRawRequest, sendHttpRequest } from './http.js'
+import { parseRawRequest, evaluatePostPolicy, sendHttpRequest } from './http.js'
 
 const ADDON_DIR = fileURLToPath(new URL('../../assets/mitmproxy/', import.meta.url))
-const IMAGE = 'mitmproxy/mitmproxy:latest'
 
 export interface FlowSummary {
   id: string
@@ -74,13 +74,13 @@ export function formatFlow(f: FlowSummary): string {
   return `${f.id} ${f.method} ${f.status} ${f.url} (req ${f.req_bytes}B / rsp ${f.rsp_bytes}B)`
 }
 
-async function dockerContainerForPort(port: number): Promise<string | null> {
+async function dockerContainerForPort(port: number, imageKey: string): Promise<string | null> {
   const { spawnSync } = await import('node:child_process')
   try {
     const out = spawnSync('docker', ['ps', '--format', '{{.ID}} {{.Ports}} {{.Image}}'], { encoding: 'utf8', timeout: 15_000 })
     if (out.status !== 0) return null
     for (const line of (out.stdout ?? '').split('\n')) {
-      if (line.includes(`0.0.0.0:${port}->`) && line.includes('mitmproxy/mitmproxy')) {
+      if (line.includes(`0.0.0.0:${port}->`) && line.includes(imageKey)) {
         return line.split(/\s+/)[0] ?? null
       }
     }
@@ -90,11 +90,15 @@ async function dockerContainerForPort(port: number): Promise<string | null> {
   }
 }
 
-async function sidecarState(config: ConfigType): Promise<{ running: boolean; pid?: number; port?: number; container?: string }> {
-  const file = join(proxyDir(config), 'sidecar.json')
+/** Repository part of the configured sidecar image, for matching `docker ps` rows. */
+export function proxyImageKey(config: ConfigType): string {
+  return config.proxyImage.split(':')[0] ?? 'mitmproxy/mitmproxy'
+}
+
+async function sidecarState(config: ConfigType): Promise<{ running: boolean; pid?: number; port?: number; container?: string; nonce?: string }> {  const file = join(proxyDir(config), 'sidecar.json')
   if (!existsSync(file)) return { running: false }
   try {
-    const state = JSON.parse(readFileSync(file, 'utf8')) as { pid: number; port: number }
+    const state = JSON.parse(readFileSync(file, 'utf8')) as { pid: number; port: number; nonce?: string }
     // Liveness 1: the marker records the docker child pid we spawned. Only
     // valid inside the process that spawned it — headless exits invalidate it.
     let alive = false
@@ -104,13 +108,55 @@ async function sidecarState(config: ConfigType): Promise<{ running: boolean; pid
     } catch {
       alive = false
     }
-    if (alive) return { running: true, pid: state.pid, port: state.port }
+    if (alive) return { running: true, pid: state.pid, port: state.port, nonce: state.nonce }
     // Liveness 2: fall back to docker ps — the container outlives us.
-    const container = await dockerContainerForPort(state.port)
-    if (container) return { running: true, pid: state.pid, port: state.port, container }
+    const container = await dockerContainerForPort(state.port, proxyImageKey(config))
+    if (container) return { running: true, pid: state.pid, port: state.port, container, nonce: state.nonce }
     return { running: false }
   } catch {
     return { running: false }
+  }
+}
+
+/**
+ * tasklist CSV row check (Windows): is `pid` a docker CLI process?
+ * Pure — unit-tested. Guards the stop path against a forged sidecar.json:
+ * the workspace is model-writable, so a pid read from it must never reach
+ * process.kill unverified (that would SIGKILL an arbitrary host process).
+ */
+export function tasklistRowIsDockerCli(csv: string, pid: number): boolean {
+  for (const line of csv.split('\n')) {
+    const cells = line.split('","').map((c) => c.replace(/^"|"$/g, '').trim())
+    if (cells.length >= 2 && cells[0]?.toLowerCase() === 'docker.exe' && Number(cells[1]) === pid) return true
+  }
+  return false
+}
+
+/** /proc cmdline check (POSIX): is the process a docker CLI? Pure — unit-tested. */
+export function procCmdlineIsDockerCli(cmdline: string): boolean {
+  const prog = cmdline.split('\0')[0] ?? ''
+  return prog === 'docker' || prog.endsWith('/docker')
+}
+
+/**
+ * Best-effort OS ownership check: does `pid` currently belong to a docker
+ * CLI process? Any check failure (no /proc, tasklist missing, ESRCH race)
+ * returns false — the stop path then falls through to `docker stop` instead
+ * of process.kill. Never throws.
+ */
+export async function pidOwnedByDockerCli(pid: number): Promise<boolean> {
+  try {
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    if (process.platform === 'win32') {
+      const { spawnSync } = await import('node:child_process')
+      const out = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', timeout: 10_000 })
+      if (out.status !== 0) return false
+      return tasklistRowIsDockerCli(out.stdout ?? '', pid)
+    }
+    const { readFileSync: readSync } = await import('node:fs')
+    return procCmdlineIsDockerCli(readSync(`/proc/${pid}/cmdline`, 'utf8'))
+  } catch {
+    return false
   }
 }
 
@@ -176,7 +222,7 @@ export function registerProxy(ctx: Context, config: ConfigType) {
               '-p', `${port}:8080`,
               '-v', `${ws}:/workspace`,
               '-v', `${addonHost}:/addon.py:ro`,
-              IMAGE,
+              config.proxyImage,
               'mitmdump', '-p', '8080', '-s', '/addon.py', '--set', 'confdir=/workspace/proxy/.mitmproxy',
             ],
             { shell: false, windowsHide: true, stdio: 'ignore', detached: false },
@@ -203,7 +249,7 @@ export function registerProxy(ctx: Context, config: ConfigType) {
           } catch {
             /* best effort */
           }
-          writeFileSync(join(dir, 'sidecar.json'), JSON.stringify({ pid: child.pid, port }), 'utf8')
+          writeFileSync(join(dir, 'sidecar.json'), JSON.stringify({ pid: child.pid, port, nonce: randomUUID() }), 'utf8')
           return (
             `${warnPrefix}Sidecar listening on http://localhost:${port} (container mitmdump, addon logging to workspace/proxy/).\n`
             + `Point the client/browser at it as HTTP(S) proxy. Captures: workspace/proxy/flows.jsonl + flows/<id>.req/.rsp.\n`
@@ -241,21 +287,35 @@ export function registerProxy(ctx: Context, config: ConfigType) {
           // (same fetch path and output format as strix_http).
           const parsed = parseRawRequest(rawReq)
           if (!parsed.url) return `REJECTED: flow ${id} has no replayable URL (CONNECT metadata only — HTTPS without the sidecar CA).`
+          // A replay IS a new request: the spray-guard runs inside
+          // evaluatePostPolicy (verb check included), so the proxy cannot be
+          // used to bypass counting, audit stamps, or the cap.
+          let replayNote = ''
+          {
+            const verdict = evaluatePostPolicy(config, parsed.url, parsed.body ?? '', parsed.method.toUpperCase())
+            if (!verdict.proceed) return verdict.rejection
+            replayNote = verdict.note
+          }
           const sent = await sendHttpRequest(config, {
             url: parsed.url,
             method: parsed.method,
             headers: parsed.headers,
             body: parsed.body,
           })
-          return `Replay of ${id}:\n${sent.text}`
+          return `Replay of ${id}:${replayNote}\n${sent.text}`
         }
 
         if (args.action === 'stop') {
           const state = await sidecarState(config)
           if (!state.running) return 'Sidecar not running.'
-          // Kill path 1: our own spawned child (same-process start).
+          // Kill path 1: our own spawned child (same-process start) — but ONLY
+          // when the OS confirms the pid still belongs to a docker CLI.
+          // sidecar.json lives in the model-writable workspace, so a forged
+          // pid must never reach process.kill (it would SIGKILL an arbitrary
+          // host process, including dsh itself). Unverified pids fall through
+          // to the docker-stop path below.
           let stopped = false
-          if (state.pid !== undefined) {
+          if (state.pid !== undefined && (await pidOwnedByDockerCli(state.pid))) {
             try {
               process.kill(state.pid, 'SIGKILL')
               stopped = true
@@ -266,7 +326,7 @@ export function registerProxy(ctx: Context, config: ConfigType) {
           // Kill path 2: docker stop by container id (cross-process: the
           // container outlives the headless/one-shot process that started it).
           if (!stopped) {
-            const container = state.container ?? (state.port !== undefined ? await dockerContainerForPort(state.port) : null)
+            const container = state.container ?? (state.port !== undefined ? await dockerContainerForPort(state.port, proxyImageKey(config)) : null)
             if (container) {
               const { spawnSync } = await import('node:child_process')
               try {
