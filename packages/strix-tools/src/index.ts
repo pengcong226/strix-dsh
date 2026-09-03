@@ -73,7 +73,7 @@ export async function apply(ctx: Context, config: ConfigType) {
   const skillCount = await registerBundledSkills(ctx)
 
   // eslint-disable-next-line no-console -- visible load signal in harness startup output
-  console.log(`[strix-dsh-tools] registered ${registrations.length} tool modules (16 tools) + methodology + authorization sections + ${skillCount} skills; workspace: ${workspaceDir(config)}`)
+  console.log(`[strix-dsh-tools] registered ${registrations.length} tool modules + methodology + authorization sections + ${skillCount} skills; workspace: ${workspaceDir(config)}`)
 }
 
 /** Exported for regression tests: the AUTONOMY discipline must survive refactors. */

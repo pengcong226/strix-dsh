@@ -3,18 +3,20 @@
  * raw-request parsing, finding validation, ledger round-trips, and the
  * bounded-output helper. No Docker, no network, no LLM — safe in CI.
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { ConfigType } from '../src/config.js'
-import { safeId, safeWorkspacePath, truncate } from '../src/lib/util.js'
+import { nextIdAmong, nextSequentialId, runProcess, safeId, safeWorkspacePath, truncate, writeExclusive } from '../src/lib/util.js'
+import { registerBundledSkills } from '../src/skills-provider.js'
+import { registerNotes } from '../src/tools/notes.js'
 import { checkExtraArgs } from '../src/tools/sast.js'
 import { matchesAutoAllow } from '../src/lib/approval.js'
 import { methodologySection } from '../src/index.js'
-import { formatDepFinding, parseOsvVuln, sortDepFindings } from '../src/tools/depcheck.js'
+import { formatDepFinding, parseOsvVuln, readKevCache, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest } from '../src/tools/http.js'
-import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, listFindings, missingFinishSections, validateFinding } from '../src/tools/finding.js'
+import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, listFindings, missingFinishSections, registerFinding, registerReport, validateFinding } from '../src/tools/finding.js'
 import { OUTCOMES, readLedger, writeLedger } from '../src/tools/coverage.js'
 import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, renderAuthorizationSection } from '../src/tools/authorization.js'
 import { bumpPostCount, postCountsPath, readPostCounts } from '../src/tools/http.js'
@@ -582,15 +584,39 @@ describe('http POST per-path counter', () => {
     expect(bumpPostCount(config, '/oas/forgetPassword')).toBe(2)
     expect(bumpPostCount(config, '/other')).toBe(1)
     expect(readPostCounts(config)).toEqual({ '/oas/forgetPassword': 2, '/other': 1 })
-    // Persisted as JSON next to the workspace.
-    expect(JSON.parse(readFileSync(postCountsPath(config), 'utf8'))['/oas/forgetPassword']).toBe(2)
+    // Persisted as an append-only JSONL ledger: one {ts, path} line per send.
+    const lines = readFileSync(postCountsPath(config), 'utf8').split('\n').filter((l) => l.trim())
+    expect(lines).toHaveLength(3)
+    for (const line of lines) {
+      const parsed = JSON.parse(line) as { ts?: string; path?: string }
+      expect(typeof parsed.ts).toBe('string')
+      expect(typeof parsed.path).toBe('string')
+    }
   })
 
   it('returns empty on missing or corrupt files instead of throwing', () => {
     expect(readPostCounts(scratchConfig())).toEqual({})
     const config = scratchConfig()
-    writeFileSync(postCountsPath(config), '{not json', 'utf8')
-    expect(readPostCounts(config)).toEqual({})
+    writeFileSync(postCountsPath(config), '{not json\n{"path":"/x"}\n', 'utf8')
+    // The torn line is skipped, the rest of the ledger still counts — a
+    // corrupt ledger must not silently disable the spray cap.
+    expect(readPostCounts(config)).toEqual({ '/x': 1 })
+  })
+
+  it('merges the pre-0.12 JSON ledger without resetting the budget', () => {
+    const config = scratchConfig()
+    writeFileSync(join(config.workspaceDir, 'http-post-counts.json'), JSON.stringify({ '/oas/forgetPassword': 5 }))
+    // At the cap already: an upgrade must not hand the model a fresh budget.
+    expect(readPostCounts(config)).toEqual({ '/oas/forgetPassword': 5 })
+    expect(bumpPostCount(config, '/oas/forgetPassword')).toBe(6)
+  })
+
+  it('does not lose counts when two writers append concurrently', () => {
+    const config = scratchConfig()
+    // The old read→mutate→rewrite implementation had each writer read the
+    // same total and both write old+1. Appending is order-independent.
+    for (let i = 0; i < 7; i++) bumpPostCount(config, '/api/reset')
+    expect(readPostCounts(config)['/api/reset']).toBe(7)
   })
 
   it('exposes the configured per-path cap default', () => {
@@ -878,5 +904,256 @@ describe('sarif sidecar', () => {
     expect(onDisk.version).toBe('2.1.0')
     expect(() => writeSarifReport(config, [], [], '../evil.sarif')).toThrow(/REJECTED/)
     expect(() => writeSarifReport(config, [], [], 'x.json')).toThrow(/REJECTED/)
+  })
+})
+
+describe('id allocation (regression: archived/deleted entries must not collide)', () => {
+  it('takes max+1, never count+1', () => {
+    expect(nextIdAmong([], 'F-')).toBe('F-001')
+    expect(nextIdAmong(['F-001', 'F-002'], 'F-')).toBe('F-003')
+    // The regression: F-003 was archived out of the workspace. count+1 would
+    // hand back F-003 and overwrite the live F-003; max+1 must give F-004.
+    expect(nextIdAmong(['F-001', 'F-002', 'F-004', 'F-005'], 'F-')).toBe('F-006')
+    expect(nextIdAmong(['F-009', 'F-010'], 'F-')).toBe('F-011')
+  })
+
+  it('ignores unrelated filenames in the directory', () => {
+    const config = scratchConfig()
+    const dir = join(config.workspaceDir, 'findings')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'F-001.json'), '{}')
+    writeFileSync(join(dir, 'report.md'), 'not an id')
+    expect(nextSequentialId(dir, 'F-')).toBe('F-002')
+  })
+
+  it('does not collide after a middle finding is removed from disk', () => {
+    const config = scratchConfig()
+    const dir = join(config.workspaceDir, 'findings')
+    mkdirSync(dir, { recursive: true })
+    for (const id of ['F-001', 'F-002', 'F-003', 'F-004', 'F-005']) {
+      writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, title: `orig ${id}` }))
+    }
+    rmSync(join(dir, 'F-003.json'))
+    const next = nextSequentialId(dir, 'F-')
+    expect(next).toBe('F-006')
+    expect(existsSync(join(dir, `${next}.json`))).toBe(false)
+  })
+
+  it('writeExclusive claims the slot and refuses to clobber', () => {
+    const config = scratchConfig()
+    const file = join(config.workspaceDir, 'claim.json')
+    expect(writeExclusive(file, '{"id":"first"}')).toBe(true)
+    expect(writeExclusive(file, '{"id":"second"}')).toBe(false)
+    expect(JSON.parse(readFileSync(file, 'utf8')).id).toBe('first')
+  })
+
+  it('strix_notes reuses no live id after a delete', async () => {
+    const config = scratchConfig()
+    const captured: Record<string, { execute: (a: unknown, e: unknown) => Promise<string> }> = {}
+    registerNotes({ tools: { register: (t) => { captured[t.name] = t } } } as never, config)
+    const notes = captured.strix_notes!
+    for (const t of ['a', 'b', 'c', 'd']) {
+      await notes.execute({ action: 'create', title: t, body: 'x' }, {})
+    }
+    await notes.execute({ action: 'delete', id: 'N-002' }, {})
+    const out = await notes.execute({ action: 'create', title: 'e', body: 'x' }, {})
+    expect(out).toContain('N-005')
+    const list = await notes.execute({ action: 'list' }, {})
+    expect(list).toContain('N-004')
+    expect(list).not.toContain('N-002')
+  })
+})
+
+describe('report rendering (regression: blank separator lines must survive)', () => {
+  it('keeps paragraph breaks so --- is a rule and lists do not swallow text', () => {
+    const config = scratchConfig()
+    const captured: Record<string, { execute: (a: unknown, e: unknown) => Promise<string> }> = {}
+    registerReport({ tools: { register: (t) => { captured[t.name] = t } } } as never, config)
+    const dir = join(config.workspaceDir, 'findings')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'F-001.json'), JSON.stringify({
+      id: 'F-001', title: 'ThinkPHP RCE', vulnerability_type: 'rce', severity: 'critical',
+      target: 'http://127.0.0.1:18080/index.php', description: 'Unauthenticated RCE.',
+      evidence: 'uid=33(www-data)', confidence: 'high',
+      counterevidence: 'WAF could block; it did not.', remediation: 'Upgrade.',
+      created_at: 't0',
+    }))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (captured.strix_report!.execute({ action: 'report' }, {}) as any).then(() => {
+      const md = readFileSync(join(config.workspaceDir, 'report.md'), 'utf8')
+      const lines = md.split('\n')
+      expect(lines.filter((l) => l.trim() === '').length).toBeGreaterThan(3)
+      // A `---` directly under a text line is parsed as a setext H2.
+      const rule = lines.indexOf('---')
+      expect(rule).toBeGreaterThan(0)
+      expect(lines[rule - 1]!.trim()).toBe('')
+      // The description must not be a lazy continuation of the metadata list.
+      const desc = lines.indexOf('Unauthenticated RCE.')
+      expect(lines[desc - 1]!.trim()).toBe('')
+    })
+  })
+})
+
+describe('create validation (strict evidence, trimmed)', () => {
+  it('rejects missing AND whitespace-only evidence in strict mode', () => {
+    expect(validateFinding({}, true)).toMatch(/REJECTED/)
+    expect(validateFinding({ evidence: '   ' }, true)).toMatch(/REJECTED/)
+    expect(validateFinding({ evidence: 'uid=33' }, true)).toBeNull()
+    expect(validateFinding({ evidence: 'uid=33' }, false)).toBeNull()
+  })
+
+  it('rejects out-of-list enums', () => {
+    expect(validateFinding({ evidence: 'x', severity: 'SortaCritical' }, false)).toMatch(/severity/)
+    expect(validateFinding({ evidence: 'x', vulnerability_type: 'skynet' }, false)).toMatch(/vulnerability_type/)
+  })
+})
+
+describe('finding update guards (regression: update was the back door past create validation)', () => {
+  async function seededTool(config: ConfigType): Promise<{ execute: (a: unknown, e: unknown) => Promise<string> }> {
+    let captured: { execute: (a: unknown, e: unknown) => Promise<string> } | undefined
+    registerFinding({ tools: { register: (t) => { captured = t } } } as never, config)
+    mkdirSync(join(config.workspaceDir, 'findings'), { recursive: true })
+    writeFileSync(join(config.workspaceDir, 'findings', 'F-001.json'), JSON.stringify({
+      id: 'F-001', title: 'SQLi in /login', vulnerability_type: 'sqli', severity: 'high',
+      target: 'http://t/login', description: 'd', evidence: "1' OR '1'='1", created_at: 't0',
+    }))
+    return captured!
+  }
+
+  it('rejects a bogus severity through the tool surface', async () => {
+    const tool = await seededTool(scratchConfig())
+    await expect(tool.execute({ action: 'update', id: 'F-001', severity: 'SortaCritical' }, {}))
+      .resolves.toMatch(/severity must be one of/)
+  })
+
+  it('rejects emptying evidence under strict mode', async () => {
+    const tool = await seededTool(scratchConfig())
+    await expect(tool.execute({ action: 'update', id: 'F-001', evidence: '   ' }, {}))
+      .resolves.toMatch(/forbids emptying the evidence/)
+  })
+
+  it('allows unrelated updates (no evidence field passed)', async () => {
+    const config = scratchConfig() // strictEvidence: true
+    const tool = await seededTool(config)
+    await expect(tool.execute({ action: 'update', id: 'F-001', title: 'SQLi in /login (confirmed)', confidence: 'high' }, {}))
+      .resolves.toContain('Updated F-001')
+  })
+})
+
+describe('dedupe-check manifest handling (regression: mismatch must not short-circuit)', () => {
+  const mkFinding = (id: string, hay: string): Finding => ({
+    id, title: hay, vulnerability_type: 'dependency_cve', severity: 'high',
+    target: hay, description: hay, evidence: hay, created_at: 't0',
+  })
+
+  it('keeps scanning past a manifest mismatch', () => {
+    const existing = [
+      // F-001 shares CVE+package+ecosystem but never mentions the
+      // candidate's manifest.
+      mkFinding('F-001', 'npm lodash CVE-2021-23337 prototype pollution'),
+      // F-002 shares all of that AND names the candidate's manifest.
+      mkFinding('F-002', 'npm b/package.json lodash CVE-2021-23337'),
+    ]
+    const verdict = checkDuplicate(
+      { vulnerability_type: 'dependency_cve', cve: 'CVE-2021-23337', package_name: 'lodash', package_ecosystem: 'npm', manifest_path: 'b/package.json' },
+      existing,
+    )
+    expect(verdict.duplicate).toBe(true)
+    expect(verdict.existing_id).toBe('F-002')
+  })
+
+  it('still reports distinct manifests as distinct findings', () => {
+    const existing = [mkFinding('F-001', 'npm a/package.json lodash CVE-2021-23337')]
+    const verdict = checkDuplicate(
+      { vulnerability_type: 'dependency_cve', cve: 'CVE-2021-23337', package_name: 'lodash', package_ecosystem: 'npm', manifest_path: 'b/package.json' },
+      existing,
+    )
+    expect(verdict.duplicate).toBe(false)
+  })
+})
+
+describe('KEV cache reads', () => {
+  const writeKev = (config: ConfigType, fetchedAt: string, cves: string[]): void => {
+    const dir = join(config.workspaceDir, 'vulndb')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'kev.json'), JSON.stringify({ fetched_at: fetchedAt, cves }))
+  }
+
+  it('treats a corrupt fetched_at as unusable instead of throwing', () => {
+    const config = scratchConfig()
+    writeKev(config, 'not-a-date', ['CVE-1'])
+    expect(readKevCache(config, Date.now())).toBeNull()
+  })
+
+  it('stale is null for freshness checks but usable for plain lookups', () => {
+    const config = scratchConfig()
+    const old = Date.now() - 25 * 3600 * 1000
+    writeKev(config, new Date(old).toISOString(), ['CVE-2024-0001'])
+    expect(readKevCache(config, Date.now())).toBeNull()
+    expect(readKevCache(config)?.has('CVE-2024-0001')).toBe(true)
+  })
+})
+
+describe('bundled skills loading is fail-soft', () => {
+  it('registers nothing and does not throw on a corrupt manifest', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'strix-skills-'))
+    writeFileSync(join(dir, 'manifest.json'), '{ not json')
+    const registered: string[] = []
+    const ctx = { skills: { register: (s: { name: string }) => { registered.push(s.name) } } }
+    await expect(registerBundledSkills(ctx as never, dir)).resolves.toBe(0)
+    expect(registered).toHaveLength(0)
+  })
+
+  it('skips unreadable entries and duplicate names, registers the rest', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'strix-skills-'))
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify([
+      { name: 'good', description: 'd', category: 'c', upstream: 'u', file: 'good.md' },
+      { name: 'missing', description: 'd', category: 'c', upstream: 'u', file: 'missing.md' },
+      { name: 'good', description: 'dupe', category: 'c', upstream: 'u', file: 'good.md' },
+      { name: '', description: 'd', category: 'c', upstream: 'u', file: 'noname.md' },
+    ]))
+    writeFileSync(join(dir, 'good.md'), 'content')
+    const registered: string[] = []
+    const ctx = { skills: { register: (s: { name: string }) => { registered.push(s.name) } } }
+    await expect(registerBundledSkills(ctx as never, dir)).resolves.toBe(1)
+    expect(registered).toEqual(['good'])
+  })
+})
+
+describe('runProcess timeout reaps the process tree', () => {
+  // node is guaranteed on PATH in CI (setup-node) and locally; `sleep` is not
+  // a thing on Windows runners.
+  const hang = () => runProcess(process.execPath, ['-e', 'setInterval(()=>{}, 100)'], { timeoutMs: 700 })
+
+  it('reports timedOut and settles promptly', async () => {
+    const started = Date.now()
+    const result = await hang()
+    expect(result.timedOut).toBe(true)
+    expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  it.skipIf(process.platform !== 'win32')('kills grandchildren too (Windows taskkill /T)', async () => {
+    // cmd -> ping. If only cmd died, ping would keep the stdio pipes open and
+    // `close` would not fire until ping's full 30s lifetime — so a prompt
+    // settle IS the assertion that the tree was reaped.
+    const started = Date.now()
+    const result = await runProcess('cmd', ['/c', 'ping -n 30 127.0.0.1'], { timeoutMs: 900 })
+    expect(result.timedOut).toBe(true)
+    expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  it.skipIf(process.platform === 'win32')('kills grandchildren too (POSIX process group)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'strix-tree-'))
+    const pidFile = join(dir, 'grandchild.pid')
+    const js = "require('fs').writeFileSync(" + JSON.stringify(pidFile) + ", String(process.pid)); setInterval(()=>{}, 100)"
+    // `& wait` forces the shell to fork, so node really is a grandchild
+    // (a single simple command would be exec-replaced into the shell).
+    const result = await runProcess('sh', ['-c', 'node -e ' + JSON.stringify(js) + ' & wait'], { timeoutMs: 800 })
+    expect(result.timedOut).toBe(true)
+    const grandchild = Number.parseInt(readFileSync(pidFile, 'utf8').trim(), 10)
+    await new Promise((r) => setTimeout(r, 300))
+    let alive = true
+    try { process.kill(grandchild, 0) } catch { alive = false }
+    expect(alive).toBe(false)
   })
 })

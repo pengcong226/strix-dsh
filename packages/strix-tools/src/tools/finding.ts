@@ -10,7 +10,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
-import { safeId, workspaceDir, workspaceSub } from '../lib/util.js'
+import { nextIdAmong, nextSequentialId, safeId, workspaceDir, workspaceSub, writeExclusive } from '../lib/util.js'
 import { maskTestAccount, readAuthorization } from './authorization.js'
 import { readLedger } from './coverage.js'
 import { writeSarifReport } from './sarif.js'
@@ -63,8 +63,13 @@ export function listFindings(config: ConfigType): Finding[] {
     .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as Finding)
 }
 
+/**
+ * Next finding id. Derived from the highest existing id (not the count), so
+ * archiving or deleting a middle finding can never make a new id collide
+ * with — and silently overwrite — a live one. Exported for regression tests.
+ */
 function nextId(config: ConfigType): string {
-  return `F-${String(listFindings(config).length + 1).padStart(3, '0')}`
+  return nextSequentialId(findingsDir(config), 'F-')
 }
 
 function severityCounts(findings: Finding[]): Record<string, number> {
@@ -124,6 +129,7 @@ export function checkDuplicate(
   excludeId?: string,
 ): DedupeVerdict {
   const cType = norm(candidate.vulnerability_type || 'other')
+  let manifestMismatch: { id: string; manifest: string } | null = null
 
   for (const f of existing) {
     if (excludeId && f.id === excludeId) continue
@@ -139,11 +145,14 @@ export function checkDuplicate(
       const eco = norm(candidate.package_ecosystem)
       if (eco && !hay.includes(eco)) continue
       const manifest = String(candidate.manifest_path ?? '').trim()
-      if (manifest && hay.includes(manifest.toLowerCase()) === false && manifest !== '') {
-        // Candidate names a manifest the existing text never mentions — treat
-        // as distinct (mirrors _distinct_manifest_paths: two manifests, two
-        // findings). Only when BOTH sides would otherwise match.
-        return { duplicate: false, reason: `same CVE/package but different manifest context (${manifest}); file separately.` }
+      if (manifest && !hay.includes(manifest.toLowerCase())) {
+        // Candidate names a manifest the existing text never mentions — THIS
+        // finding is distinct (mirrors _distinct_manifest_paths: two
+        // manifests, two findings). Remember it for the reason text but keep
+        // scanning: a later finding may still be a real duplicate, and an
+        // early `return not-duplicate` here would short-circuit that.
+        manifestMismatch = { id: f.id, manifest }
+        continue
       }
       return { duplicate: true, existing_id: f.id, reason: `same CVE ${candidate.cve} + package ${candidate.package_name} as ${f.id}.` }
     }
@@ -159,11 +168,19 @@ export function checkDuplicate(
       return { duplicate: true, existing_id: f.id, reason: `same type (${cType}) + same endpoint (${endpointKey(cTarget)}) + overlapping target text as ${f.id}.` }
     }
   }
+  if (manifestMismatch) {
+    return {
+      duplicate: false,
+      reason: `same CVE/package as ${manifestMismatch.id} but different manifest context (${manifestMismatch.manifest}); file separately.`,
+    }
+  }
   return { duplicate: false, reason: 'no registered finding shares type + endpoint + target text.' }
 }
 
 export function validateFinding(args: Record<string, unknown>, strict: boolean): string | null {
-  if (strict && !args.evidence) {
+  // Trim check: a whitespace-only evidence string is no evidence, and the
+  // truthiness check `!args.evidence` alone let it slip past strict mode.
+  if (strict && !String(args.evidence ?? '').trim()) {
     return 'REJECTED: no evidence. A finding without a demonstrated PoC (request/response pair, exploit output, '
       + 'or a complete reachable trace) is not a finding — it is at best an open_proof_gap. Record it in '
       + 'strix_coverage with needs_follow_up instead, or come back with concrete evidence.'
@@ -253,8 +270,7 @@ export function registerFinding(ctx: Context, config: ConfigType) {
           if (!args.title) return 'REJECTED: title is required.'
           if (!args.severity) return 'REJECTED: severity is required.'
           if (!args.target) return 'REJECTED: target is required.'
-          const finding: Finding = {
-            id: nextId(config),
+          const draft = {
             title: String(args.title),
             vulnerability_type: String(args.vulnerability_type ?? 'other'),
             severity: String(args.severity),
@@ -270,8 +286,16 @@ export function registerFinding(ctx: Context, config: ConfigType) {
             fix_pr_body: args.fix_pr_body ? String(args.fix_pr_body) : undefined,
             created_at: new Date().toISOString(),
           }
-          writeFileSync(join(dir, `${finding.id}.json`), JSON.stringify(finding, null, 2), 'utf8')
-          return `Registered ${finding.id} [${finding.severity}] ${finding.title} — ${finding.target}.`
+          // Allocate the id, then claim the file with O_EXCL. If another
+          // creator took the same id between the scan and the write, re-scan
+          // and retry rather than overwriting them.
+          for (let attempt = 0; attempt < 20; attempt++) {
+            const finding: Finding = { id: nextId(config), ...draft }
+            if (writeExclusive(join(dir, `${finding.id}.json`), JSON.stringify(finding, null, 2))) {
+              return `Registered ${finding.id} [${finding.severity}] ${finding.title} — ${finding.target}.`
+            }
+          }
+          return 'REJECTED: could not allocate a free finding id after 20 attempts (concurrent writers on this workspace). Retry once.'
         }
 
         if (args.action === 'update') {
@@ -280,6 +304,23 @@ export function registerFinding(ctx: Context, config: ConfigType) {
           const file = join(dir, `${id}.json`)
           if (!existsSync(file)) return `Finding ${id} not found.`
           const existing = JSON.parse(readFileSync(file, 'utf8')) as Finding
+          // Enum guards on the fields being CHANGED (create already validates
+          // the whole object; update must not be the back door for garbage —
+          // e.g. severity "SortaCritical" slipping into the ledger and the
+          // report's severity counts).
+          if (args.severity !== undefined && !SEVERITIES.includes(args.severity as (typeof SEVERITIES)[number])) {
+            return `REJECTED: severity must be one of ${SEVERITIES.join(', ')}.`
+          }
+          if (args.vulnerability_type !== undefined && !VULN_TYPES.includes(args.vulnerability_type as (typeof VULN_TYPES)[number])) {
+            return `REJECTED: vulnerability_type must be one of ${VULN_TYPES.join(', ')}.`
+          }
+          // Strict mode also covers updates: a confirmed finding must not be
+          // quietly downgraded to evidence-less. Explicitly passing an empty
+          // evidence is a downgrade; not passing it at all is fine.
+          if (config.strictEvidence && args.evidence !== undefined && !String(args.evidence).trim()) {
+            return 'REJECTED: strict mode forbids emptying the evidence of a registered finding. '
+              + 'If the PoC no longer reproduces, update the evidence to state that and lower the severity/confidence instead.'
+          }
           const mutable = ['title', 'vulnerability_type', 'severity', 'target', 'description', 'evidence', 'cvss_vector', 'counterevidence', 'confidence', 'poc_script', 'remediation', 'code_locations', 'fix_pr_body'] as const
           for (const key of mutable) {
             if (args[key] !== undefined) (existing as unknown as Record<string, unknown>)[key] = args[key]
@@ -492,7 +533,12 @@ export function registerReport(ctx: Context, config: ConfigType) {
             `- Severity: **${f.severity}**${f.cvss_vector ? ` (CVSS: ${f.cvss_vector})` : ''}`,
             `- Type: ${f.vulnerability_type}`,
             `- Target: ${f.target}`,
-            f.confidence ? `- Confidence: ${f.confidence}` : '',
+          )
+          // Optional fields are pushed conditionally instead of as '' slots:
+          // '' is the blank-separator marker in this array, so using it for
+          // "nothing here" is what made the report lose its paragraph breaks.
+          if (f.confidence) out.push(`- Confidence: ${f.confidence}`)
+          out.push(
             '',
             f.description,
             '',
@@ -501,10 +547,10 @@ export function registerReport(ctx: Context, config: ConfigType) {
             '```',
             f.evidence,
             '```',
-            f.poc_script ? `PoC script: ${f.poc_script}` : '',
-            f.counterevidence ? `\n**Counterevidence considered:** ${f.counterevidence}` : '',
-            f.remediation ? `\n**Remediation:** ${f.remediation}` : '',
           )
+          if (f.poc_script) out.push('', `PoC script: ${f.poc_script}`)
+          if (f.counterevidence) out.push('', `**Counterevidence considered:** ${f.counterevidence}`)
+          if (f.remediation) out.push('', `**Remediation:** ${f.remediation}`)
           if (f.code_locations?.length) {
             out.push('', '**Proposed fix (inline, derived at report time):**', '')
             for (const loc of f.code_locations) {
@@ -521,7 +567,12 @@ export function registerReport(ctx: Context, config: ConfigType) {
         out.push('', '## Methodology', '', 'Reconnaissance/mapping first, automated scanning with multiple engines, targeted validation with concrete PoCs, counterevidence passes, evidence-bound severity scoring (StriX-DH, adapted from the Strix methodology).')
 
         const reportPath = join(workspaceDir(config), 'report.md')
-        writeFileSync(reportPath, out.filter((l) => l !== '').join('\n'), 'utf8')
+        // Join as-is: entries are whole blocks and the '' entries are the
+        // blank separator lines. Filtering them out (a previous version did
+        // `out.filter((l) => l !== '')`) collapses every paragraph break, so
+        // a list swallows the following description as a lazy continuation
+        // and the `---` rule becomes a setext H2.
+        writeFileSync(reportPath, out.join('\n') + '\n', 'utf8')
         return `Report written to ${reportPath} (${findings.length} findings, ${coverageLines.length} coverage entries).`
       },
     }),

@@ -9,7 +9,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { mirrorEvent } from '../lib/session-mirror.js'
-import { safeId, workspaceSub } from '../lib/util.js'
+import { nextSequentialId, safeId, workspaceSub, writeExclusive } from '../lib/util.js'
 
 interface Note {
   id: string
@@ -68,15 +68,22 @@ export function registerNotes(ctx: Context, config: ConfigType) {
         }
         if (args.action === 'create') {
           if (!args.title || !args.body) return 'REJECTED: title and body are required.'
-          const note: Note = {
-            id: `N-${String(notes.length + 1).padStart(3, '0')}`,
-            title: String(args.title),
-            body: String(args.body),
-            created_at: new Date().toISOString(),
+          // Max-existing-id + 1, not count + 1: strix_notes has a delete
+          // action, so a gap in the middle is normal and count+1 would
+          // overwrite the last live note. The O_EXCL write claims the slot
+          // so two concurrent creators cannot collide either.
+          for (let attempt = 0; attempt < 20; attempt++) {
+            const note: Note = {
+              id: nextSequentialId(dir, 'N-'),
+              title: String(args.title),
+              body: String(args.body),
+              created_at: new Date().toISOString(),
+            }
+            if (!writeExclusive(join(dir, `${note.id}.json`), JSON.stringify(note, null, 2))) continue
+            mirrorEvent(exec, 'strix/note', { action: 'create', note: { id: note.id, title: note.title, body: note.body } })
+            return `Saved ${note.id}: ${note.title}.`
           }
-          writeFileSync(join(dir, `${note.id}.json`), JSON.stringify(note, null, 2), 'utf8')
-          mirrorEvent(exec, 'strix/note', { action: 'create', note: { id: note.id, title: note.title, body: note.body } })
-          return `Saved ${note.id}: ${note.title}.`
+          return 'REJECTED: could not allocate a free note id after 20 attempts (concurrent writers on this workspace). Retry once.'
         }
         if (args.action === 'update') {
           const uid = String(args.id ?? '')

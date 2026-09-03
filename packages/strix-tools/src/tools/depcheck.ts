@@ -70,17 +70,26 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
   }
 }
 
-/** Read the KEV cache when fresh; null when missing/stale/corrupt. Pure-ish (fs read). */
+/**
+ * Read the KEV cache when fresh; null when missing/stale/corrupt.
+ *
+ * Two call shapes (previous behaviour kept, dead branch removed):
+ * - `nowMs === undefined` (callers that just want a lookup): a stale cache is
+ *   still returned — a slightly old "exploited in the wild" list beats none,
+ *   and `kevCacheFresh` is how a caller asks whether a refresh is due.
+ * - `nowMs` given (kevCacheFresh): staleness returns null, i.e. NOT fresh.
+ *
+ * Pure-ish (fs read) — unit-tested.
+ */
 export function readKevCache(config: ConfigType, nowMs?: number): Set<string> | null {
   const file = kevFile(config)
   if (!existsSync(file)) return null
   try {
     const raw = JSON.parse(readFileSync(file, 'utf8')) as { fetched_at: string; cves: string[] }
-    if (Date.now() - Date.parse(raw.fetched_at) > KEV_TTL_MS && nowMs === undefined) {
-      // Stale — caller decides refresh; still usable as fallback (see below).
-    }
-    if (nowMs !== undefined && nowMs - Date.parse(raw.fetched_at) > KEV_TTL_MS) return null
-    return new Set(raw.cves)
+    const fetchedAt = Date.parse(raw.fetched_at)
+    if (Number.isNaN(fetchedAt)) return null
+    if (nowMs !== undefined && nowMs - fetchedAt > KEV_TTL_MS) return null
+    return new Set(Array.isArray(raw.cves) ? raw.cves : [])
   } catch {
     return null
   }

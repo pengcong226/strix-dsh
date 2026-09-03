@@ -5,7 +5,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { safeWorkspacePath, truncate, workspaceDir, workspaceSub } from '../lib/util.js'
@@ -64,19 +64,63 @@ export function parseRawRequest(raw: string): { url?: string; method: string; he
 
 /**
  * Per-path counter for non-preapproved POSTs sent under a live attestation
- * (spray guard). Persisted in workspace/http-post-counts.json so concurrent
- * agents share one budget. Pure filesystem helpers — unit-tested.
+ * (spray guard). Persisted as an APPEND-ONLY JSONL ledger in
+ * workspace/http-post-counts.jsonl so concurrent agents share one budget.
+ *
+ * The previous implementation rewrote a JSON object (read → mutate → write).
+ * Two agents sending in the same engagement each read the old total and both
+ * wrote `old + 1`, so N concurrent POSTs collapsed into one increment and the
+ * cap could be exceeded. Appending one line per send has no read-modify-write
+ * window, and it doubles as an audit trail of who POSTed what, when.
+ *
+ * Pure filesystem helpers — unit-tested.
  */
-const POST_COUNTS_FILE = 'http-post-counts.json'
+const POST_COUNTS_FILE = 'http-post-counts.jsonl'
+
+/**
+ * Pre-0.12 ledger format (a JSON object of counts). Read, never written: an
+ * existing engagement must not silently get a fresh POST budget on upgrade.
+ */
+const POST_COUNTS_LEGACY_FILE = 'http-post-counts.json'
 
 export function postCountsPath(config: ConfigType): string {
   return join(workspaceDir(config), POST_COUNTS_FILE)
 }
 
-export function readPostCounts(config: ConfigType): Record<string, number> {
+function legacyPostCountsPath(config: ConfigType): string {
+  return join(workspaceDir(config), POST_COUNTS_LEGACY_FILE)
+}
+
+/** Tally the append-only ledger. A torn line is skipped, not fatal. */
+export function tallyPostLog(config: ConfigType): Record<string, number> {
+  const file = postCountsPath(config)
+  if (!existsSync(file)) return {}
+  let raw = ''
   try {
-    if (!existsSync(postCountsPath(config))) return {}
-    const parsed: unknown = JSON.parse(readFileSync(postCountsPath(config), 'utf8'))
+    raw = readFileSync(file, 'utf8')
+  } catch {
+    return {}
+  }
+  const out: Record<string, number> = {}
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line) as { path?: unknown }
+      if (typeof parsed?.path === 'string' && parsed.path) {
+        out[parsed.path] = (out[parsed.path] ?? 0) + 1
+      }
+    } catch {
+      /* skip the torn line; the rest of the ledger still counts */
+    }
+  }
+  return out
+}
+
+function readLegacyPostCounts(config: ConfigType): Record<string, number> {
+  const file = legacyPostCountsPath(config)
+  if (!existsSync(file)) return {}
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
     const out: Record<string, number> = {}
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
@@ -88,20 +132,29 @@ export function readPostCounts(config: ConfigType): Record<string, number> {
   }
 }
 
+/** Current per-path totals: append-only ledger plus any legacy totals. */
+export function readPostCounts(config: ConfigType): Record<string, number> {
+  const counts = readLegacyPostCounts(config)
+  for (const [path, n] of Object.entries(tallyPostLog(config))) {
+    counts[path] = (counts[path] ?? 0) + n
+  }
+  return counts
+}
+
 /**
- * Increment the counter for a path and persist. Returns the new count.
- * Pure-ish (filesystem write) — unit-tested against scratch configs.
+ * Record one non-preapproved POST and return the resulting count for that
+ * path. The line append is a single `O_APPEND` write — no read-modify-write
+ * window — and the count is recomputed from the ledger afterwards, so two
+ * concurrent senders both see the true total.
  */
 export function bumpPostCount(config: ConfigType, path: string): number {
-  const counts = readPostCounts(config)
-  const next = (counts[path] ?? 0) + 1
-  counts[path] = next
   try {
-    writeFileSync(postCountsPath(config), JSON.stringify(counts, null, 2), 'utf8')
+    appendFileSync(postCountsPath(config), `${JSON.stringify({ ts: new Date().toISOString(), path })}\n`, 'utf8')
   } catch {
     /* best-effort audit persistence: the send proceeds regardless */
   }
-  return next
+  const seen = readPostCounts(config)[path] ?? 0
+  return seen > 0 ? seen : 1
 }
 
 export interface SendHttpOptions {

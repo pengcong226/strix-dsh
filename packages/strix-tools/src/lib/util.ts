@@ -2,8 +2,8 @@
  * Shared helpers for StriX-DH tools: workspace resolution, bounded output,
  * subprocess execution with timeouts, and Docker invocation.
  */
-import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import type { ConfigType } from '../config.js'
@@ -54,6 +54,73 @@ export function safeId(value: string): boolean {
 }
 
 /**
+ * Next free id of the form `<prefix>NNN` given the ids already in use.
+ * `prefix` is the literal id prefix including its separator, e.g. `'F-'`.
+ *
+ * The number comes from the MAXIMUM existing id, never from the COUNT: an
+ * engagement archives or deletes entries in the middle (findings move to
+ * _archive/, notes get deleted), and `count + 1` then collides with a live
+ * id — silently overwriting a real finding. On top of max+1 we walk forward
+ * past any id still in use, so a file created outside this process (another
+ * dsh instance, a manual copy) cannot be clobbered either.
+ *
+ * Pure — unit-tested.
+ */
+export function nextIdAmong(existingIds: string[], prefix: string, pad = 3): string {
+  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`^${escaped}(\\d+)$`)
+  let max = 0
+  for (const id of existingIds) {
+    const m = pattern.exec(id)
+    if (m) {
+      const n = Number.parseInt(m[1], 10)
+      if (Number.isFinite(n)) max = Math.max(max, n)
+    }
+  }
+  return `${prefix}${String(max + 1).padStart(pad, '0')}`
+}
+
+/**
+ * Write `data` to `file`, refusing to clobber an existing file (O_EXCL).
+ * Returns false when the file already existed — callers re-allocate an id
+ * and retry. This is what makes concurrent creators (two subagents, or a
+ * second dsh process on the same workspace) fail loudly instead of
+ * silently overwriting each other's findings.
+ */
+export function writeExclusive(file: string, data: string): boolean {
+  try {
+    writeFileSync(file, data, { encoding: 'utf8', flag: 'wx' })
+    return true
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') return false
+    throw err
+  }
+}
+
+/** True when a write failed only because the target file already existed. */
+export function isEexist(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === 'EEXIST'
+}
+
+/**
+ * Filesystem flavour of {@link nextIdAmong}: scans a workspace subdirectory
+ * for `<prefix>NNN.json` files and returns the next free id. Used by
+ * strix_finding (findings/) and strix_notes (notes/).
+ */
+export function nextSequentialId(dir: string, prefix: string, pad = 3): string {
+  let names: string[] = []
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return `${prefix}${String(1).padStart(pad, '0')}`
+  }
+  const ids = names
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => f.slice(0, -'.json'.length))
+  return nextIdAmong(ids, prefix, pad)
+}
+
+/**
  * Resolve a model-supplied relative path under a workspace base directory.
  * Returns null when the resolved path escapes the base (traversal attempt).
  */
@@ -80,7 +147,17 @@ export interface RunResult {
   stderr: string
 }
 
-/** Spawn a process, capture output, enforce a timeout (kills the tree on expiry). */
+/**
+ * Spawn a process, capture output, enforce a timeout.
+ *
+ * On expiry the WHOLE process tree is killed, not just the direct child:
+ * engines here shell out (`nuclei -t ...` spawning workers, `bash -c "a; b"`)
+ * and a bare SIGKILL on the parent orphans the grandchildren, which keep
+ * burning CPU and network after the tool call has already returned "timed
+ * out". POSIX: the child is spawned detached (own process group) so a single
+ * `kill(-pid)` reaps the group. Windows has no process groups, so the
+ * equivalent is `taskkill /T /F`.
+ */
 export function runProcess(
   command: string,
   args: string[],
@@ -97,12 +174,46 @@ export function runProcess(
       cwd: opts.cwd,
       shell: false,
       windowsHide: true,
+      // POSIX only: own process group, so kill(-pid) reaps the tree. On
+      // Windows `detached` would detach the child into its own console,
+      // which buys nothing — taskkill /T walks the tree directly.
+      detached: process.platform !== 'win32',
       env: { ...process.env },
     })
 
+    const killTree = (): void => {
+      if (process.platform === 'win32') {
+        if (child.pid) {
+          // spawnSync ON PURPOSE. The async fire-and-forget variant loses a
+          // race against the child.kill() fallback: cmd dies first, and when
+          // taskkill finally gets to enumerate the tree the root is gone, so
+          // /T never reaches the grandchildren — which then keep the stdio
+          // pipes (and this whole call) open for their full natural lifetime.
+          const r = spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+          if (r.error || (r.status !== 0 && r.status !== null)) {
+            try { child.kill('SIGKILL') } catch { /* already gone */ }
+          }
+          return
+        }
+      } else if (child.pid) {
+        // The child was spawned detached, i.e. as its own process-group
+        // leader: one negative-pid kill reaps the whole tree.
+        try {
+          process.kill(-child.pid, 'SIGKILL')
+        } catch {
+          /* group already gone */
+        }
+      }
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* already exited */
+      }
+    }
+
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGKILL')
+      killTree()
     }, opts.timeoutMs)
 
     child.stdout.on('data', (d: Buffer) => {

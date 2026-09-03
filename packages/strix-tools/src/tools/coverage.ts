@@ -16,7 +16,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { mirrorEvent } from '../lib/session-mirror.js'
-import { workspaceSub } from '../lib/util.js'
+import { nextIdAmong, workspaceSub } from '../lib/util.js'
 
 export const OUTCOMES = ['clean', 'finding', 'needs_follow_up', 'blocked', 'ruled_out'] as const
 
@@ -96,7 +96,9 @@ export function registerCoverage(ctx: Context, config: ConfigType) {
             return `REJECTED: outcome must be one of ${OUTCOMES.join(', ')}.`
           }
           const entry: CoverageEntry = {
-            id: `C-${String(entries.length + 1).padStart(3, '0')}`,
+            // Max-existing-id + 1: a ledger row removed or an entry edited by
+            // hand must not make the next id collide with a live row.
+            id: nextIdAmong(entries.map((e) => e.id), 'C-'),
             surface: String(args.surface),
             risk_area: String(args.risk_area),
             outcome: String(args.outcome),
