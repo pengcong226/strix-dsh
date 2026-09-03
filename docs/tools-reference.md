@@ -79,7 +79,7 @@ age: 245897
 
 **配置交互**：`httpTimeoutMs`、`httpMaxBodyChars`、`httpPostCapPerPath`（默认 5）。
 
-**POST 政策**（0.11.0）：三分支——① 命中 `pre_approved_post_paths`（精确 path+body）→ 直发 + clearance 审计行；② 未命中但存在有效（未过期）授权 → 直发 + `[non-preapproved POST <path> — live authorization, count n/N]` 审计戳，按 path 计入 `workspace/http-post-counts.json`；③ 无授权 → 与旧版一致直发。超 `httpPostCapPerPath` 时 REJECTED，指引记 `needs_follow_up` 并申请预批，不许换词重试。
+**POST 政策**（0.11.0）：三分支——① 命中 `pre_approved_post_paths`（精确 path+body）→ 直发 + clearance 审计行；② 未命中但存在有效（未过期）授权 → 直发 + `[non-preapproved POST <path> — live authorization, count n/N]` 审计戳，按 path 计入追加式账本 `workspace/http-post-counts.jsonl`（旧 .json 只读合并，升级不重置预算）；③ 无授权 → 与旧版一致直发。超 `httpPostCapPerPath` 时 REJECTED，指引记 `needs_follow_up` 并申请预批，不许换词重试。
 
 ---
 
@@ -478,7 +478,7 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | 配置 | 默认 | 影响 |
 |---|---|---|
 | `workspaceDir` | `''` → `~/.dsh/strix-workspace` | 全部产物根目录 |
-| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http（cap：同 path 非预批 POST 上限，存 `workspace/http-post-counts.json`） |
+| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http（cap：同 path 非预批 POST 上限，存追加式账本 `workspace/http-post-counts.jsonl`） |
 | `shellImage` / `shellNetwork` / `shellTimeoutMs` | python:3.12-slim / true / 120s | strix_shell |
 | `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox |
 | `binariesDir` | `''` | recon/sast 二进制发现（`~/.dsh/bin` 始终在搜索路径） |

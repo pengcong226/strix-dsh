@@ -18,8 +18,10 @@ export interface ConfigType {
   httpMaxBodyChars: number
   /**
    * strix_http: per-path cap for non-preapproved POSTs sent under a live
-   * authorization (spray guard). 0 disables the cap. Persisted in
-   * workspace/http-post-counts.json, keyed by path.
+   * authorization (spray guard). 0 disables the cap. Persisted as an
+   * append-only ledger in workspace/http-post-counts.jsonl, keyed by path
+   * (pre-0.12 workspace/http-post-counts.json is read-only-merged, never
+   * rewritten, so upgrades keep the existing budget).
    */
   httpPostCapPerPath: number
   /** strix_shell: container image used for command execution. */

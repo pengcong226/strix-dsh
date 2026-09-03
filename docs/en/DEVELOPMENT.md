@@ -341,7 +341,7 @@ Docker Desktop 29.7.2 (WSL2) ✅; `~/.dsh/bin/{subfinder,httpx,nuclei}.exe` ✅;
 cd packages/strix-tools && npm run build        # zero errors before continuing
 dsh --profile web --dump-config | grep strix     # bundle layer present
 npx -y @deepseek-ai/dsh@0.1.2-alpha.5 web --no-open > dsh-boot.log 2>&1 &
-# boot log line 1 should read: [strix-dsh-tools] registered 16 tool modules (16 tools) + methodology + authorization sections + 75 skills
+# boot log line 1 should read: [strix-dsh-tools] registered 16 tool modules + methodology + authorization sections + 75 skills
 DEEPSEEK_API_KEY=... npx -y @deepseek-ai/dsh@0.1.2-alpha.5 --profile headless \
   "Call strix_runs once and quote its first line."
 # approval-gate regression (default should DENY):

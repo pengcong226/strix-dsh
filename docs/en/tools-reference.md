@@ -77,7 +77,7 @@ age: 245897
 - Timeout → `"Request failed: timeout after Nms (aborted). The host may be filtered, down, or the port/scheme wrong — fix the target rather than retrying blindly."`
 - Connection failure → ships DNS/port/protocol troubleshooting hints; **treating "unreachable" as a finding is a methodology error** (mirrors the Strix discipline on Caido error pages)
 
-**Config interactions**: `httpTimeoutMs`, `httpMaxBodyChars`, `httpPostCapPerPath` (default 5). **POST policy** (0.11.0, three branches): pre-approved path+body → send + clearance line; live attestation but non-preapproved → send + audit stamp with per-path count in `workspace/http-post-counts.json`; no attestation → legacy behavior. Over-cap POSTs are REJECTED with a needs_follow_up pointer.
+**Config interactions**: `httpTimeoutMs`, `httpMaxBodyChars`, `httpPostCapPerPath` (default 5). **POST policy** (0.11.0, three branches): pre-approved path+body → send + clearance line; live attestation but non-preapproved → send + audit stamp with per-path count in the append-only ledger `workspace/http-post-counts.jsonl` (legacy .json merged read-only); no attestation → legacy behavior. Over-cap POSTs are REJECTED with a needs_follow_up pointer.
 
 ---
 
