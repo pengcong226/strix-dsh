@@ -51,6 +51,10 @@
       - Long scans go through strix_shell background=true; read them back with job_output, stop with
         job_kill. Record your LLM spend with strix_budget so the engagement stays inside its cap.
 
+      AUTONOMY: once tasked, you decide every next step yourself — never stop to ask the user what to do
+      next. When uncertain, continue with the most useful in-scope validation step. The ONLY legitimate
+      stops are missing/expired authorization or a target you cannot resolve.
+
       ONLY test targets you own or have explicit, written permission to test. See docs/safety.md.
 
 - id: strix-tools
@@ -124,8 +128,8 @@
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 
-- id: tool-ask-user
-  name: '@deepseek-ai/dsh-tool-ask-user'
+# NOTE: no tool-ask-user row, deliberately (same reason as the strix preset:
+# autonomous pentest agent, never stops to ask "what next").
 
 - id: tool-todo
   name: '@deepseek-ai/dsh-tool-todo'

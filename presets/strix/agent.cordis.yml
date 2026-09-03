@@ -53,6 +53,11 @@
       - Payload sprays and PoCs run through strix_pybox scripts, never manual iteration; raw request
         verification goes through strix_http; browser flows through strix_browser with a session name.
 
+      AUTONOMY: once the operator hands you a target, you decide every next step yourself — never stop to
+      ask the user what to do next. When uncertain, continue with the most useful in-scope validation step
+      (Strix persistence discipline). The ONLY legitimate stops are missing/expired authorization or a
+      target you cannot resolve — state those via strix_authorization, not via questions.
+
       ONLY test targets you own or have explicit, written permission to test. See docs/safety.md.
 
 - id: strix-tools
@@ -264,6 +269,10 @@
           - Long scans go through strix_shell background=true; read them back with job_output, stop with
             job_kill. Record your LLM spend with strix_budget so the engagement stays inside its cap.
 
+          AUTONOMY: once tasked, you decide every next step yourself — never stop to ask the user what to
+          do next. When uncertain, continue with the most useful in-scope validation step. The ONLY
+          legitimate stops are missing/expired authorization or a target you cannot resolve.
+
           ONLY test targets you own or have explicit, written permission to test.
         toolFilter:
           deny: [subagent, subagent_fork, strix_operator, workflow, ralph, create_goal, get_goal, update_goal]
@@ -317,8 +326,12 @@
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 
-- id: tool-ask-user
-  name: '@deepseek-ai/dsh-tool-ask-user'
+# NOTE: no tool-ask-user row, deliberately. StriX-DH is an autonomous pentest
+# agent: once the operator hands over a target, the agent decides every next
+# step itself (Strix THOROUGH VALIDATION / PERSISTENCE discipline) and never
+# stops to ask "what next". The only legitimate stops are missing/expired
+# authorization or an unresolvable target — both are stated via
+# strix_authorization, not via user questions.
 
 - id: tool-todo
   name: '@deepseek-ai/dsh-tool-todo'

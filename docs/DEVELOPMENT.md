@@ -277,6 +277,7 @@ dsh --profile headless "call strix_runs and quote its first line"
 
 | 插件版本 | 内容 |
 |---|---|
+| **0.10.0**（09-03） | **AI 漏洞库**：新工具 `strix_depcheck`（OSV querybatch 主查 → vulns/{id} 明细 → KEV 缓存命中 → EPSS 排序；KEV 全量 workspace/vulndb/kev.json 24h TTL；结果直喂 `strix_finding dependency_cve` + `dedupe-check` 身份）；`strix_sast` nuclei 容器挂 `strix-nuclei-templates` 命名卷（模板日更不断层）。单测 4 例，vitest 66 例；headless 实测 lodash@4.17.20 查出 5 洞（CVE/EPSS/fixed 全）+ KEV 1694 缓存 + dedupe 链 |
 | **0.9.0**（09-03） | **渗透手感放开**：`strix_shell` image allowlist 只在无人值守（approvalGate off）时强制，有人审批时镜像名进审批摘要由人定；`strix_sast` extra_args 黑名单缩到三类（重定向目标/限速并发/引擎配置），模板选择/输出格式/代理路由全放开；新增 `approvalAutoAllow`（正则预批，默认空=行为不变，命中记 `auto-allowed` 审计）。单测 3 例，vitest 62 例；`-t cves/` 放行 + `-rl` 照拦 headless 实测 |
 | **0.8.2**（09-03） | **全项目 review 安全修复**：`safeId`/`safeWorkspacePath`（util.ts）堵四处路径遍历（http save_to 写出 workspace、finding get/update 坏 id、notes get/update/delete 坏 id、browser session 名进截图文件名）；`strix_shell` image allowlist（`shellAllowedImages` 配置，默认仅 shellImage）；`strix_sast` extra_args 危险 flag 黑名单 + nuclei severity 白名单；browser sessions 进程级共享文档化。单测 6 例，vitest 59 例；四守卫 headless 真实触发验证（REJECTED 逐字引用） |
 | **0.8.1**（09-03） | **REFUSAL AVOIDANCE 条件版**：`strix:authorization` section 三态渲染（无授权=被动提醒；有效授权=事实+ refusal-avoidance 段；过期=警告+退回被动），`isAuthorizationExpired` 纯函数；上游无条件版"never question authority"仍不出——差异故意（本地无平台级 scope 验证）。单测 3 例，vitest 53 例，真实渲染验证 |
@@ -289,7 +290,7 @@ dsh --profile headless "call strix_runs and quote its first line"
 | **0.2.0**（09-03） | **HITL 审批门**：strix_shell/strix_pybox 逐调用经 dsh ApprovalService 审批（fail-closed），`approvalGate: 'always'\|'off'` 配置，插件 inject 增 `'approval'`，新增 `src/lib/approval.ts` 与 `<workspace>/evidence/log.jsonl` 台账；方法论节增"审批门纪律"条目 |
 | 0.1.0 | 12 工具初版 + 方法论 section + 75 技能（alpha.3 → alpha.5 适配完成） |
 
-### 4.1 工具契约与验证矩阵（15/15 已注册；V=真实 LLM 调用验证，D=直接调用验证，-=待二进制/目标）
+### 4.1 工具契约与验证矩阵（16/16 已注册；V=真实 LLM 调用验证，D=直接调用验证，-=待二进制/目标）
 
 | 工具 | 参数要点 | 验证 |
 |---|---|---|
@@ -308,6 +309,7 @@ dsh --profile headless "call strix_runs and quote its first line"
 | `strix_sast` | engine=nuclei/semgrep；nuclei 容器优先（宿主二进制回退）；semgrep 容器回退；**预算门（warn 前缀/block 拒止）** | V（nuclei 容器扫描 exit 0；semgrep 容器对自身源码 exit 0） |
 | `strix_budget` | record/status/reset；台账 `workspace/budget.json`；`budgetLimitUsd`/`budgetInputPer1k`/`budgetOutputPer1k`/`budgetAction` | V（headless：status 空态 → record $0.0175 → cap $0.0001 下 recon 被拒 `BUDGET EXCEEDED` → reset 清零；单测 7 例） |
 | `strix_proxy` | start/status/list/get/replay/stop；mitmdump 容器侧车 + addon 落盘；replay 经共享 sender | V（headless：start :18080 → curl 走代理 GET example.com → flows.jsonl + .req/.rsp 落盘 → list/replay `HTTP 200 OK` → stop 跨进程 `docker stop`；单测 4 例） |
+| `strix_depcheck` | action=check/kev-refresh/status；packages `[{ecosystem,name,version}]`；OSV 主查 + KEV 缓存（vulndb/kev.json 24h TTL）+ EPSS 排序 | V（headless：status 缺缓存 → kev-refresh 1694 → check lodash@4.17.20 查出 5 洞 CVE/EPSS/fixed 全 → dedupe-check NOT A DUPLICATE 链；单测 4 例） |
 
 ### 4.2 配置全表（`src/config.ts`）
 
@@ -333,7 +335,7 @@ Docker Desktop 29.7.2（WSL2）✅；`~/.dsh/bin/{subfinder,httpx,nuclei}.exe` �
 cd packages/strix-tools && npm run build        # 零 error 才继续
 dsh --profile web --dump-config | grep strix     # bundle 层在
 npx -y @deepseek-ai/dsh@0.1.2-alpha.5 web --no-open > dsh-boot.log 2>&1 &
-# 启动日志第一行应为: [strix-dsh-tools] registered 15 tool modules (15 tools) + methodology + authorization sections + 75 skills
+# 启动日志第一行应为: [strix-dsh-tools] registered 16 tool modules (16 tools) + methodology + authorization sections + 75 skills
 DEEPSEEK_API_KEY=... npx -y @deepseek-ai/dsh@0.1.2-alpha.5 --profile headless \
   "Call strix_runs once and quote its first line."
 # 审批门回归（默认应 DENIED）：
@@ -359,7 +361,7 @@ DEEPSEEK_API_KEY=... npx -y @deepseek-ai/dsh@0.1.2-alpha.5 --profile headless \
 
 ## 6. 发布前清单（开源准备）
 
-- [x] vitest 单测（62 例，`packages/strix-tools/test/core.test.ts`）+ kebab/adapt 自测（7 例，`scripts/adapt_skills.py --self-test`，CI 内）
+- [x] vitest 单测（66 例，`packages/strix-tools/test/core.test.ts`）+ kebab/adapt 自测（7 例，`scripts/adapt_skills.py --self-test`，CI 内）
 - [x] `.github/workflows/ci.yml`（build + test + adapt 自测，node 20/22，windows+ubuntu）
 - [x] SECURITY.md / CONTRIBUTING.md（根目录；safety.md 的"to be added"已指向 SECURITY.md）
 - [x] 英文版 docs（`docs/en/` 全覆盖：tools-reference + walkthrough + DEVELOPMENT + architecture + prompt-design + skills-catalog + 双 analysis；safety 本身即英文原文）

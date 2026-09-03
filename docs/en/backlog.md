@@ -26,17 +26,13 @@ Status quo: `strix-dsh` ships no vulnerability database. The 29 `skills/vulnerab
 
 Honest search log: DuckDuckGo bot-check-blocked direct fetching; Bing RSS worked but snippets were thin; NVD/GitHub/EPSS doc pages are JS-rendered or 404 to WebFetch — anything unread is labeled "known/unconfirmed", never invented. Decisive evidence is the three live curls (OSV/KEV/EPSS all green), matching the original A-2 plan: **one `strix_depcheck` tool querying OSV→KEV→EPSS in order, deps.dev for transitive deps, all keyless**.
 
-### A-1. Pinned, self-updating Nuclei template library 🟡
+### A-1. Pinned, self-updating Nuclei template library ✅ (landed in 0.10.0)
 
-- **Background**: `strix_sast` runs the nuclei container (`projectdiscovery/nuclei` image, `--rm` one-shot), so template versions freeze at image-pull time; upstream (`projectdiscovery/nuclei-templates`) merges new CVE detection templates daily.
-- **Plan**: mount a named `nuclei-templates` volume into scan containers (volume flag in `sast.ts` + one-shot `docker volume create`); document the `nuclei -update-templates` refresh flow.
-- **Acceptance**: a new CVE template is callable on consecutive days; unit test covers the volume-arg construction.
+- **Landed**: `sast.ts` nuclei containers mount the `strix-nuclei-templates` named volume (`ensureNucleiTemplateVolume`, best-effort create); refresh with `docker run --rm -v strix-nuclei-templates:/root/nuclei-templates projectdiscovery/nuclei -update-templates`. Documented at the end of the `strix_depcheck` section in tools-reference.
 
-### A-2. Dependency CVE lookup (OSV.dev) 🟡
+### A-2. Dependency CVE lookup (OSV.dev) ✅ (landed in 0.10.0)
 
-- **Background**: the `dependency_cve` type has no source; maintaining our own DB is out of the question.
-- **Plan**: new `strix_depcheck` tool (or folded into sast): query OSV.dev (free, keyless, covers npm/PyPI/Go/Maven, minute-level freshness) for `package+version → CVE`, file results via `strix_finding dedupe-check` (CVE + package identity). Metadata queries go over host fetch, not attack traffic.
-- **Acceptance**: `lodash@4.17.20` resolves to CVE-2021-23337 and files as F-NNN; re-checking the same package returns DUPLICATE.
+- **Landed**: new `strix_depcheck` tool (`src/tools/depcheck.ts`, 16/16 tools): `check` (OSV querybatch → vulns/{id} detail → KEV cache → EPSS ordering) / `kev-refresh` / `status`; KEV snapshot in `workspace/vulndb/kev.json` with 24h TTL; 4 unit cases; lodash@4.17.20 returned 5 vulns (CVE/EPSS/fixed) + 1694-entry KEV cache + dedupe chain verified live. Transitive deps via deps.dev not wired — OSV covers direct versions; add on demand.
 
 ## B. Known deferrals (Phase-2 / external)
 

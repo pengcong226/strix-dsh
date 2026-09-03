@@ -11,6 +11,7 @@ import type { ConfigType } from '../src/config.js'
 import { safeId, safeWorkspacePath, truncate } from '../src/lib/util.js'
 import { checkExtraArgs } from '../src/tools/sast.js'
 import { matchesAutoAllow } from '../src/lib/approval.js'
+import { formatDepFinding, parseOsvVuln, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest } from '../src/tools/http.js'
 import { SEVERITIES, VULN_TYPES, checkDuplicate, listFindings, missingFinishSections, validateFinding } from '../src/tools/finding.js'
 import { readLedger, writeLedger } from '../src/tools/coverage.js'
@@ -312,6 +313,50 @@ describe('approval auto-allow', () => {
   it('is empty-deny by default and skips invalid regexes', () => {
     expect(matchesAutoAllow([], 'anything')).toBe(false)
     expect(matchesAutoAllow(['([invalid'], '([invalid')).toBe(false)
+  })
+})
+
+describe('depcheck pure helpers', () => {
+  it('extracts CVE alias, CVSS_V3 severity, and fixed versions', () => {
+    const parsed = parseOsvVuln({
+      aliases: ['GHSA-29mw-wpgm-hmr9', 'CVE-2021-23337'],
+      summary: 'ReDoS in lodash',
+      severity: [{ type: 'CVSS_V3', score: 'CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H' }],
+      affected: [{ ranges: [{ type: 'ECOSYSTEM', events: [{ introduced: '0' }, { fixed: '4.17.21' }] }] }],
+    })
+    expect(parsed.cve).toBe('CVE-2021-23337')
+    expect(parsed.severity).toContain('CVSS:3.1')
+    expect(parsed.fixed_in).toEqual(['4.17.21'])
+  })
+
+  it('tolerates minimal records without severity or ranges', () => {
+    const parsed = parseOsvVuln({ id: 'GHSA-x' })
+    expect(parsed.cve).toBeNull()
+    expect(parsed.severity).toBeNull()
+    expect(parsed.fixed_in).toEqual([])
+  })
+
+  it('sorts KEV hits first, then EPSS desc, then vuln id', () => {
+    const mk = (vuln_id: string, kev_hit: boolean, epss: number | null) => ({
+      package: 'p', ecosystem: 'npm', version: '1', vuln_id, cve: null,
+      summary: 's', severity: null, kev_hit, epss, fixed_in: [],
+    })
+    const sorted = sortDepFindings([
+      mk('GHSA-b', false, 0.9),
+      mk('GHSA-a', false, null),
+      mk('GHSA-c', true, 0.1),
+    ])
+    expect(sorted.map((r) => r.vuln_id)).toEqual(['GHSA-c', 'GHSA-b', 'GHSA-a'])
+  })
+
+  it('formats one finding line with tags', () => {
+    const line = formatDepFinding({
+      package: 'lodash', ecosystem: 'npm', version: '4.17.20', vuln_id: 'GHSA-29mw-wpgm-hmr9',
+      cve: 'CVE-2021-23337', summary: 'ReDoS', severity: null, kev_hit: true, epss: 0.5, fixed_in: ['4.17.21'],
+    })
+    expect(line).toContain('lodash@4.17.20')
+    expect(line).toContain('KEV-HIT')
+    expect(line).toContain('fixed=4.17.21')
   })
 })
 

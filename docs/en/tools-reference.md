@@ -417,6 +417,29 @@ Sidecar stopped. 2 flow(s) remain queryable (list/get/replay).
 
 ---
 
+## strix_depcheck — dependency vulnerability database (AI-tooling vuln DB)
+
+**Strix counterpart**: the data source for the `dependency_cve` type (previously an empty shell); research verdict in `docs/en/backlog.md` A-0 (free OSV/KEV/EPSS trio wins, MCP is a dead end).
+
+| Parameter | Notes |
+|---|---|
+| `action` | check / kev-refresh / status |
+| `packages` | check: `[{ecosystem, name, version}]` (ecosystem e.g. npm/PyPI/Go/Maven; max 50 per call) |
+
+**Chain**: OSV `querybatch` primary (package+version → vuln ids) → `vulns/{id}` detail (summary/CVSS_V3/fixed versions/CVE aliases) → KEV cache hit (`workspace/vulndb/kev.json`, 24h TTL, auto-refreshed when missing/stale) → per-CVE EPSS scores → KEV hits first, EPSS desc. Results feed `strix_finding create vulnerability_type=dependency_cve` directly (`dedupe-check` keys on CVE + package). **Prove reachability before filing**: a vulnerable dependency is a lead.
+
+**Real output** (headless, lodash@4.17.20):
+
+```
+5 known vuln(s) in 1 package(s) (KEV-hit first, then EPSS):
+- lodash@4.17.20 [npm] GHSA-35jh-r3h4-6jhm: Command Injection in lodash (epss=0.213 CVE-2021-23337 cvss=CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H fixed=4.17.21)
+- lodash@4.17.20 [npm] GHSA-29mw-wpgm-hmr9: Regular Expression Denial of Service (ReDoS) in lodash (epss=0.073 CVE-2020-28500 ...)
+```
+
+**Nuclei template library (backlog A-1, landed together)**: scan containers mount the `strix-nuclei-templates` named volume so templates survive `--rm`; refresh with `docker run --rm -v strix-nuclei-templates:/root/nuclei-templates projectdiscovery/nuclei -update-templates` (upstream merges daily).
+
+---
+
 ## strix_budget — LLM spend ledger
 
 **Background**: dsh's token-meter measures context pressure, not dollars, and alpha.5 has no pricing API — so this ledger prices usage with operator-configured per-1K rates (code defaults: DeepSeek V3.2 official, input $0.00027/1K, output $0.0004/1K; this machine's three profiles override to muse-spark-1.3-contributor via opencodego: input $0.0001/1K, output $0.0002/1K), accumulated in `workspace/budget.json`. The ledger is only as honest as its records: the agent faithfully `record`s its own per-turn usage. When dsh opens a usage subscription, recording can switch to automatic; the ledger format already allows for it.

@@ -26,17 +26,13 @@
 
 搜索过程诚实记录：DuckDuckGo 直接 bot-check 拦截；Bing RSS 可用但摘要稀疏；NVD/GitHub/EPSS 官方文档页多为 JS 渲染或 404，WebFetch 读不到数字——凡未读到数字的一律标"已知/未证实"而不编造。决定性证据是三条亲手 curl（OSV/KEV/EPSS 全通），与 A-2 原方案一致：**一个 `strix_depcheck` 工具按 OSV→KEV→EPSS 顺序查，deps.dev 补传递依赖，全部无 key**。
 
-### A-1. Nuclei 模板库常驻更新 🟡
+### A-1. Nuclei 模板库常驻更新 ✅（0.10.0 已落地）
 
-- **背景**：`strix_sast` 跑 nuclei 容器（`projectdiscovery/nuclei` 镜像，`--rm` 一次性），模板版本=拉镜像那天；模板上游（`projectdiscovery/nuclei-templates`）社区每天合新 CVE 检测模板。
-- **方案**：命名卷 `nuclei-templates` 挂载进扫描容器（`sast.ts` 加卷参数 + 一次性 `docker volume create`）；文档写 `nuclei -update-templates` 更新流程。
-- **验收**：连续两天扫描，新 CVE 模板可被调用；单测覆盖卷参数构造。
+- **落地**：`sast.ts` nuclei 容器挂 `strix-nuclei-templates` 命名卷（`ensureNucleiTemplateVolume` best-effort 建卷）；刷新：`docker run --rm -v strix-nuclei-templates:/root/nuclei-templates projectdiscovery/nuclei -update-templates`。文档见 tools-reference `strix_depcheck` 节尾。
 
-### A-2. 依赖 CVE 查询（OSV.dev） 🟡
+### A-2. 依赖 CVE 查询（OSV.dev） ✅（0.10.0 已落地）
 
-- **背景**：`dependency_cve` 类型无数据源；自建库维护不起。
-- **方案**：新增 `strix_depcheck` 工具（或并入 sast）：调 OSV.dev API（免费、无 key、覆盖 npm/PyPI/Go/Maven，分钟级更新）查 `package+version → CVE`，结果走 `strix_finding dedupe-check`（CVE+包名身份）登记。网络走宿主 fetch（元数据查询，非攻击流量）。
-- **验收**：给定 `lodash@4.17.20` 查出 CVE-2021-23337 并登记为 F-NNN；dedupe 复查重包判 DUPLICATE。
+- **落地**：新工具 `strix_depcheck`（`src/tools/depcheck.ts`，16/16 工具）：`check`（OSV querybatch → vulns/{id} 明细 → KEV 缓存 → EPSS 排序）/ `kev-refresh` / `status`；KEV 全量 `workspace/vulndb/kev.json` 24h TTL；单测 4 例；headless 实测 lodash@4.17.20 查出 5 洞（CVE/EPSS/fixed 全）+ KEV 1694 + dedupe 链。deps.dev 传递依赖未接——OSV 主链已覆盖直接版本，传递依赖待后续按需加。
 
 ## B. 已知待办（Phase-2/等外部）
 

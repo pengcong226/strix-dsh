@@ -5,6 +5,7 @@
  * — validate everything with strix_http/strix_pybox/strix_browser before
  * filing.
  */
+import { spawnSync } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync } from 'node:fs'
@@ -38,6 +39,18 @@ export function checkExtraArgs(extra: string[]): string | null {
     }
   }
   return null
+}
+
+/** Named volume holding nuclei templates across `--rm` scans (backlog A-1). */
+export const NUCLEI_TEMPLATE_VOLUME = 'strix-nuclei-templates'
+
+/** Best-effort `docker volume create` — failure just means stock templates. */
+export function ensureNucleiTemplateVolume(): void {
+  try {
+    spawnSync('docker', ['volume', 'create', NUCLEI_TEMPLATE_VOLUME], { timeout: 15_000, windowsHide: true })
+  } catch {
+    /* without Docker there is no volume; the scan falls back below anyway */
+  }
 }
 
 export function registerSast(ctx: Context, config: ConfigType) {
@@ -79,12 +92,18 @@ export function registerSast(ctx: Context, config: ConfigType) {
           // Container first: the projectdiscovery/nuclei image ships its own
           // template library and avoids Windows config-dir write failures in
           // sandboxed child processes (nuclei otherwise hangs on startup).
+          // Templates persist in the `strix-nuclei-templates` named volume
+          // (backlog A-1): refresh with
+          // `docker run --rm -v strix-nuclei-templates:/root/nuclei-templates
+          // projectdiscovery/nuclei -update-templates` — daily upstream merges
+          // then reach every scan without re-pulling the image.
           const docker = findBinary(config, 'docker')
           const hostBin = findBinary(config, 'nuclei')
           let result: RunResult
           let via: string
 
           if (docker) {
+            ensureNucleiTemplateVolume()
             result = await dockerRun(config, {
               image: 'projectdiscovery/nuclei',
               command: [
@@ -101,8 +120,9 @@ export function registerSast(ctx: Context, config: ConfigType) {
               timeoutMs,
               network: true,
               workdir: '/workspace',
+              extraVolumes: ['-v', `${NUCLEI_TEMPLATE_VOLUME}:/root/nuclei-templates`],
             })
-            via = 'container (projectdiscovery/nuclei)'
+            via = 'container (projectdiscovery/nuclei, templates volume)'
           } else if (hostBin) {
             result = await runProcess(
               hostBin,

@@ -23,6 +23,7 @@ import { registerSast } from './tools/sast.js'
 import { registerBrowser } from './tools/browser.js'
 import { registerAuthorization, renderAuthorizationSection } from './tools/authorization.js'
 import { registerBudget } from './tools/budget.js'
+import { registerDepcheck } from './tools/depcheck.js'
 import { registerProxy } from './tools/proxy.js'
 import { workspaceDir } from './lib/util.js'
 import { registerBundledSkills } from './skills-provider.js'
@@ -47,6 +48,7 @@ export async function apply(ctx: Context, config: ConfigType) {
     registerBrowser,
     registerAuthorization,
     registerBudget,
+    registerDepcheck,
     registerProxy,
   ]
 
@@ -71,7 +73,7 @@ export async function apply(ctx: Context, config: ConfigType) {
   const skillCount = await registerBundledSkills(ctx)
 
   // eslint-disable-next-line no-console -- visible load signal in harness startup output
-  console.log(`[strix-dsh-tools] registered ${registrations.length} tool modules (15 tools) + methodology + authorization sections + ${skillCount} skills; workspace: ${workspaceDir(config)}`)
+  console.log(`[strix-dsh-tools] registered ${registrations.length} tool modules (16 tools) + methodology + authorization sections + ${skillCount} skills; workspace: ${workspaceDir(config)}`)
 }
 
 function methodologySection(config: ConfigType): string {

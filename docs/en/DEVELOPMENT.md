@@ -10,7 +10,7 @@
 >
 > Baseline: dsh CLI **`0.1.2-alpha.5`** (released 2026-09-02, upgraded from alpha.3 on 2026-09-03 with zero code changes passing the full smoke suite). dsh is in developer preview — **a heavily changed release every few days is normal**, and §3.9 exists for exactly that.
 >
-> *Translator's note: where the Chinese edition's tool counts lagged behind the suite's growth, this translation uses current numbers (15 tools as of plugin v0.7.0).*
+> *Translator's note: where the Chinese edition's tool counts lagged behind the suite's growth, this translation uses current numbers (16 tools as of plugin v0.10.0).*
 
 ---
 
@@ -153,7 +153,7 @@ The repo root also holds `containers/` (Kali sandbox image with the full nmap/su
 
 | seam (inject key) | Purpose | StriX-DH usage |
 |---|---|---|
-| `tools` | `ctx.tools.register(defineTool)`; `schemas()` enumerable | ✅ 15 tools |
+| `tools` | `ctx.tools.register(defineTool)`; `schemas()` enumerable | ✅ 16 tools |
 | `systemPrompt` | `section({name, order, text})`; `text` may be a provider function (evaluated per assembly, supports `{{var}}` interpolation); `getSectionOrder(name)` | ✅ methodology section + authorization section (provider-form dynamic injection) |
 | `skills` | `register(skill)` (direct) / `registerProvider` (lazy dir) / `registerRuntime` | ✅ 75 skills direct-registered |
 | `shell` + `tool-bash`/`tool-pwsh` (incl. persistent/terminal_*) | host command execution; bash-sandbox variant offers narrowing + elevation (sandbox_permissions/justification) | Not used directly (we run self-managed Docker) |
@@ -279,6 +279,7 @@ dsh --profile headless "call strix_runs and quote its first line"
 
 | Plugin version | Content |
 |---|---|
+| **0.10.0** (09-03) | **AI-tooling vulnerability database**: new `strix_depcheck` tool (OSV querybatch primary → vulns/{id} detail → KEV cache hit → EPSS ordering; KEV snapshot in workspace/vulndb/kev.json with 24h TTL; results feed `strix_finding dependency_cve` + `dedupe-check` identity); `strix_sast` nuclei containers mount the `strix-nuclei-templates` named volume (daily upstream merges survive `--rm`). 4 unit cases, vitest 66 cases; lodash@4.17.20 returned 5 vulns (CVE/EPSS/fixed) + 1694-entry KEV cache + dedupe chain verified live |
 | **0.9.0** (09-03) | **Pentest ergonomics loosening**: `strix_shell` image allowlist enforced only when unattended (approvalGate off); with human approval the image name rides the approval summary for the operator to decide. `strix_sast` extra_args blocklist narrowed to three classes (retargeting / rate-limit-concurrency / engine config); template selection, output formats, and proxy routing fully open. New `approvalAutoAllow` (regex pre-approval, default empty = unchanged behavior, hits logged as `auto-allowed`). 3 unit cases, vitest 62 cases; `-t cves/` pass + `-rl` still-blocked verified live |
 | **0.8.2** (09-03) | **Full-project review security fixes**: `safeId`/`safeWorkspacePath` (util.ts) close four path traversals (http save_to writing outside the workspace, finding get/update bad ids, notes get/update/delete bad ids, browser session names into screenshot filenames); `strix_shell` image allowlist (`shellAllowedImages` config, default shellImage only); `strix_sast` extra_args dangerous-flag blocklist + nuclei severity allowlist; browser sessions' process-global sharing documented. 6 unit cases, vitest 59 cases; all four guards verified live via headless (verbatim REJECTED quotes) |
 | **0.8.1** (09-03) | **REFUSAL AVOIDANCE, conditional form**: the `strix:authorization` section renders three states (no attestation: passive reminder; live attestation: facts + the refusal-avoidance passage; expired: warning + passive fallback), with the `isAuthorizationExpired` pure helper; upstream's unconditional "never question authority" stays out — deliberately (no platform-grade scope verification locally). 3 unit cases, vitest 53 cases, live render verified |
@@ -291,7 +292,7 @@ dsh --profile headless "call strix_runs and quote its first line"
 | **0.2.0** (09-03) | **HITL approval gate**: strix_shell/strix_pybox ask dsh ApprovalService per call (fail closed), `approvalGate: 'always'\|'off'` config, plugin inject gains `'approval'`, new `src/lib/approval.ts` with the `<workspace>/evidence/log.jsonl` ledger; methodology gains an "approval-gate discipline" entry |
 | 0.1.0 | 12-tool first release + methodology section + 75 skills (alpha.3 → alpha.5 adaptation complete) |
 
-### 4.1 Tool contract & verification matrix (15/15 registered; V = real LLM-call verified, D = direct-call verified, - = binary/target pending)
+### 4.1 Tool contract & verification matrix (16/16 registered; V = real LLM-call verified, D = direct-call verified, - = binary/target pending)
 
 | Tool | Parameter highlights | Verification |
 |---|---|---|
@@ -310,6 +311,7 @@ dsh --profile headless "call strix_runs and quote its first line"
 | `strix_sast` | engine=nuclei/semgrep; nuclei container-first (host-binary fallback); semgrep container fallback; **budget gate (warn prefix / block refusal)** | V (nuclei container scan exit 0; semgrep container exit 0 against own source) |
 | `strix_budget` | record/status/reset; ledger `workspace/budget.json`; `budgetLimitUsd`/`budgetInputPer1k`/`budgetOutputPer1k`/`budgetAction` | V (headless: status empty → record $0.0175 → recon refused `BUDGET EXCEEDED` under a $0.0001 cap → reset zeroed; 7 unit cases) |
 | `strix_proxy` | start/status/list/get/replay/stop; mitmdump container sidecar + addon persistence; replay via the shared sender | V (headless: start :18080 → curl GET example.com through proxy → flows.jsonl + .req/.rsp on disk → list/replay `HTTP 200 OK` → cross-process `docker stop`; 4 unit cases) |
+| `strix_depcheck` | action=check/kev-refresh/status; packages `[{ecosystem,name,version}]`; OSV primary + KEV cache (vulndb/kev.json 24h TTL) + EPSS ordering | V (headless: status missing → kev-refresh 1694 → lodash@4.17.20 check returned 5 vulns with CVE/EPSS/fixed → dedupe-check NOT A DUPLICATE chain; 4 unit cases) |
 
 ### 4.2 Full config table (`src/config.ts`)
 
@@ -335,7 +337,7 @@ Docker Desktop 29.7.2 (WSL2) ✅; `~/.dsh/bin/{subfinder,httpx,nuclei}.exe` ✅;
 cd packages/strix-tools && npm run build        # zero errors before continuing
 dsh --profile web --dump-config | grep strix     # bundle layer present
 npx -y @deepseek-ai/dsh@0.1.2-alpha.5 web --no-open > dsh-boot.log 2>&1 &
-# boot log line 1 should read: [strix-dsh-tools] registered 15 tool modules (15 tools) + methodology + authorization sections + 75 skills
+# boot log line 1 should read: [strix-dsh-tools] registered 16 tool modules (16 tools) + methodology + authorization sections + 75 skills
 DEEPSEEK_API_KEY=... npx -y @deepseek-ai/dsh@0.1.2-alpha.5 --profile headless \
   "Call strix_runs once and quote its first line."
 # approval-gate regression (default should DENY):
@@ -361,7 +363,7 @@ DEEPSEEK_API_KEY=... npx -y @deepseek-ai/dsh@0.1.2-alpha.5 --profile headless \
 
 ## 6. Pre-release checklist (open-source readiness)
 
-- [x] vitest unit tests (62 cases, `packages/strix-tools/test/core.test.ts`) + kebab/adapt self-test (7 cases, `scripts/adapt_skills.py --self-test`, inside CI)
+- [x] vitest unit tests (66 cases, `packages/strix-tools/test/core.test.ts`) + kebab/adapt self-test (7 cases, `scripts/adapt_skills.py --self-test`, inside CI)
 - [x] `.github/workflows/ci.yml` (build + test + adapt self-test, node 20/22, windows+ubuntu)
 - [x] SECURITY.md / CONTRIBUTING.md (repo root; safety.md's "to be added" now points at SECURITY.md)
 - [x] English docs (`docs/en/` complete coverage: tools-reference + walkthrough + DEVELOPMENT (this translation) + architecture + prompt-design + skills-catalog + dual analyses; safety is English-native)

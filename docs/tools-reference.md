@@ -417,6 +417,29 @@ Sidecar stopped. 2 flow(s) remain queryable (list/get/replay).
 
 ---
 
+## strix_depcheck — 依赖漏洞库（AI 工具漏洞库）
+
+**Strix 对应**：`dependency_cve` 类型的数据源（此前空架子）；调研结论见 `docs/backlog.md` A-0（OSV/KEV/EPSS 免费三件套最优，MCP 此路不通）。
+
+| 参数 | 说明 |
+|---|---|
+| `action` | check / kev-refresh / status |
+| `packages` | check：`[{ecosystem, name, version}]`（ecosystem 如 npm/PyPI/Go/Maven；单次至多 50 个） |
+
+**链路**：OSV `querybatch` 主查（包+版本 → 漏洞 id）→ `vulns/{id}` 明细（summary/CVSS_V3/fixed 版本/CVE 别名）→ KEV 缓存命中（`workspace/vulndb/kev.json`，24h TTL，缺失/过期自动刷）→ EPSS 逐 CVE 取分 → KEV 命中优先、EPSS 降序输出。结果直喂 `strix_finding create vulnerability_type=dependency_cve`（`dedupe-check` 按 CVE+包名排重）。**先证可达再登记**：有洞依赖只是 lead。
+
+**真实输出**（headless，lodash@4.17.20）：
+
+```
+5 known vuln(s) in 1 package(s) (KEV-hit first, then EPSS):
+- lodash@4.17.20 [npm] GHSA-35jh-r3h4-6jhm: Command Injection in lodash (epss=0.213 CVE-2021-23337 cvss=CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H fixed=4.17.21)
+- lodash@4.17.20 [npm] GHSA-29mw-wpgm-hmr9: Regular Expression Denial of Service (ReDoS) in lodash (epss=0.073 CVE-2020-28500 ...)
+```
+
+**nuclei 模板库（backlog A-1，同版落地）**：扫描容器挂 `strix-nuclei-templates` 命名卷，模板跨 `--rm` 常驻；刷新：`docker run --rm -v strix-nuclei-templates:/root/nuclei-templates projectdiscovery/nuclei -update-templates`（上游日更）。
+
+---
+
 ## strix_budget — LLM 花费台账
 
 **背景**：dsh 的 token-meter 只计量上下文压力、不给美元价，alpha.5 也没有价格 API——所以本台账用操作者配置的每 1K 单价显式记账（代码默认 DeepSeek V3.2 官价：input $0.00027/1K，output $0.0004/1K；本机三个 profile 已覆盖为 muse-spark-1.3-contributor 经 opencodego 的价格：input $0.0001/1K，output $0.0002/1K），累计值存 `workspace/budget.json`。台账的诚实度取决于记录：agent 每 turn 如实 `record` 自己的用量。dsh 将来开放 usage 订阅后可改自动喂数，台账格式已预留。
