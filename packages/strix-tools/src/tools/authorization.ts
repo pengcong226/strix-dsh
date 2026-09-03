@@ -20,6 +20,13 @@ import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { workspaceDir } from '../lib/util.js'
 
+export interface PreApprovedPost {
+  /** Exact path allowlisted for POST-only proofs, e.g. "/oas/forgetPassword". */
+  path: string
+  /** Exact body allowlist or body contract, e.g. "empty-body-status-probe" or a field list. */
+  body: string
+}
+
 export interface Authorization {
   /** What is in scope: URLs, hosts, IP ranges, or code paths. */
   targets: string[]
@@ -31,8 +38,35 @@ export interface Authorization {
   valid_until?: string
   /** Free-form constraints, e.g. "no DoS payloads, business hours only". */
   notes?: string
+  /**
+   * Pre-approved POST-only proof paths (Strix autonomy enabler): exact
+   * path + body allowlist entries the operator clears in advance, so
+   * POST-only validations (username-existence oracles, empty-body status
+   * probes) proceed WITHOUT asking. Empty/missing = no POST pre-approval.
+   */
+  pre_approved_post_paths?: PreApprovedPost[]
   recorded_at: string
   updated_at?: string
+}
+
+/**
+ * Whether a POST request matches a pre-approved entry: same path and body
+ * within the allowlisted contract. Pure — unit-tested.
+ */
+export function matchesPreApprovedPost(
+  auth: Authorization | null,
+  path: string,
+  body: string,
+): boolean {
+  if (!auth || isAuthorizationExpired(auth)) return false
+  const entries = auth.pre_approved_post_paths ?? []
+  for (const e of entries) {
+    if (!e.path || !e.body) continue
+    if (e.path === path && (e.body === '*' || e.body === body || body.includes(e.body))) {
+      return true
+    }
+  }
+  return false
 }
 
 const FILE = 'authorization.json'
@@ -98,6 +132,10 @@ export function renderAuthorizationSection(config: ConfigType, nowMs?: number): 
   if (auth.scope_ref) lines.push(`- Scope reference: ${auth.scope_ref}`)
   if (auth.valid_until) lines.push(`- Valid until: ${auth.valid_until}`)
   if (auth.notes) lines.push(`- Constraints: ${auth.notes}`)
+  const preApproved = auth.pre_approved_post_paths ?? []
+  if (preApproved.length > 0) {
+    lines.push(`- Pre-approved POST paths (${preApproved.length}): ${preApproved.map((e) => `${e.path} [${e.body}]`).join('; ')}`)
+  }
   if (isAuthorizationExpired(auth, nowMs)) {
     lines.push(
       'This attestation has EXPIRED. Treat the engagement as unauthorized until',
@@ -125,9 +163,11 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
       name: 'strix_authorization',
       description:
         'Record, read, or revoke the engagement authorization attestation (which targets the operator '
-        + 'permits testing, who granted it, scope reference, expiry, constraints). The attestation is '
-        + 're-injected into the system prompt on every turn. Record it first when the operator states '
-        + 'permission; revoke it when the engagement ends or scope changes.',
+        + 'permits testing, who granted it, scope reference, expiry, constraints, pre-approved POST paths). '
+        + 'The attestation is re-injected into the system prompt on every turn. Record it first when the '
+        + 'operator states permission; revoke it when the engagement ends or scope changes. '
+        + 'pre_approved_post_paths clears POST-only proofs (username-existence oracles, empty-body status '
+        + 'probes) in advance as exact path + body entries — strix_http checks them and proceeds without asking.',
       parameters: {
         action: { type: 'string', required: true, description: 'set | get | clear' },
         targets: {
@@ -139,6 +179,11 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
         scope_ref: { type: 'string', description: 'Program or ticket reference, e.g. a Butian program id (set).' },
         valid_until: { type: 'string', description: 'ISO-8601 expiry of the permission, when known (set).' },
         notes: { type: 'string', description: 'Constraints, e.g. "no DoS payloads, business hours only" (set).' },
+        pre_approved_post_paths: {
+          type: 'array',
+          items: { type: 'object', additionalProperties: true },
+          description: 'set: [{path, body}] exact POST allowlist, e.g. [{path:"/oas/forgetPassword", body:"username-existence-probe"}].',
+        },
       },
       output: {
         schema: { type: 'string' },
@@ -152,6 +197,7 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
           scope_ref?: string
           valid_until?: string
           notes?: string
+          pre_approved_post_paths?: Array<{ path?: string; body?: string }>
         }
         const path = authorizationPath(config)
 
@@ -165,17 +211,26 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
           if (!args.targets?.length) return 'REJECTED: targets (at least one) is required for set.'
           if (!args.granted_by?.trim()) return 'REJECTED: granted_by is required for set.'
           const prev = readAuthorization(config)
+          const preApproved = Array.isArray(args.pre_approved_post_paths)
+            ? args.pre_approved_post_paths
+              .filter((e) => e && typeof e.path === 'string' && typeof e.body === 'string')
+              .map((e) => ({ path: e.path as string, body: e.body as string }))
+            : prev?.pre_approved_post_paths
           const auth: Authorization = {
             targets: args.targets.map(String),
             granted_by: String(args.granted_by),
             scope_ref: args.scope_ref ? String(args.scope_ref) : undefined,
             valid_until: args.valid_until ? String(args.valid_until) : undefined,
             notes: args.notes ? String(args.notes) : undefined,
+            ...(preApproved?.length ? { pre_approved_post_paths: preApproved } : {}),
             recorded_at: prev?.recorded_at ?? new Date().toISOString(),
             updated_at: prev ? new Date().toISOString() : undefined,
           }
           writeFileSync(path, JSON.stringify(auth, null, 2), 'utf8')
-          return `Authorization recorded: ${auth.targets.length} target(s), granted by ${auth.granted_by}. Re-injected into the system prompt from now on.`
+          const preNote = auth.pre_approved_post_paths?.length
+            ? ` Plus ${auth.pre_approved_post_paths.length} pre-approved POST path(s) — matching strix_http POSTs proceed without asking.`
+            : ''
+          return `Authorization recorded: ${auth.targets.length} target(s), granted by ${auth.granted_by}. Re-injected into the system prompt from now on.${preNote}`
         }
 
         if (args.action === 'clear') {

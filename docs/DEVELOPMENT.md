@@ -277,6 +277,7 @@ dsh --profile headless "call strix_runs and quote its first line"
 
 | 插件版本 | 内容 |
 |---|---|
+| **0.10.2**（09-04） | **"你定"根治（Strix 五层机制 dsh 翻译）**：用户截图"三选一你定"两现行——根因是 0.10.1 只给了"不要问"，没给"遇到需批准事项时先找预批"。方法论加 APPROVAL-OR-ACT 决策树（预批四源：已发账号/范围内低速/预批 POST/预批 shell，有即用，无才记 block 且同 turn 继续次优）+ TURN-CLOSE 模板（收尾工具清单）；operator 交差 HANDOFF FORMAT（agent_finish 等价：Tested/Findings/Open items/Recommendations，被阻项永不停机）；`authorization.json` 加 `pre_approved_post_paths`（POST-only 证明预批），`strix_http` POST 命中出 clearance 行。单测 3 例，vitest 70 例；预批链 headless 实测（set→get→POST clearance 行） |
 | **0.10.1**（09-04） | **完全自动化（Strix 方案 dsh 翻译）**：研读上游 `system_prompt.jinja`（AUTONOMOUS BEHAVIOR + 纯文本不结束 turn 的 lifecycle 语义）后定位根因——dsh 语义相反（纯文本即交权），删 ask 工具不够。方法论 + 三 persona 统一注入 AUTONOMY 纪律（永远工具调用收尾；三选项优先级自主推进；合法停机仅授权/目标问题）。`methodologySection` 回归单测，vitest 67 例；真实工作区 headless 验证零提问推进 11 面 |
 | **0.10.0**（09-03） | **AI 漏洞库**：新工具 `strix_depcheck`（OSV querybatch 主查 → vulns/{id} 明细 → KEV 缓存命中 → EPSS 排序；KEV 全量 workspace/vulndb/kev.json 24h TTL；结果直喂 `strix_finding dependency_cve` + `dedupe-check` 身份）；`strix_sast` nuclei 容器挂 `strix-nuclei-templates` 命名卷（模板日更不断层）。单测 4 例，vitest 66 例；headless 实测 lodash@4.17.20 查出 5 洞（CVE/EPSS/fixed 全）+ KEV 1694 缓存 + dedupe 链 |
 | **0.9.0**（09-03） | **渗透手感放开**：`strix_shell` image allowlist 只在无人值守（approvalGate off）时强制，有人审批时镜像名进审批摘要由人定；`strix_sast` extra_args 黑名单缩到三类（重定向目标/限速并发/引擎配置），模板选择/输出格式/代理路由全放开；新增 `approvalAutoAllow`（正则预批，默认空=行为不变，命中记 `auto-allowed` 审计）。单测 3 例，vitest 62 例；`-t cves/` 放行 + `-rl` 照拦 headless 实测 |
@@ -362,7 +363,7 @@ DEEPSEEK_API_KEY=... npx -y @deepseek-ai/dsh@0.1.2-alpha.5 --profile headless \
 
 ## 6. 发布前清单（开源准备）
 
-- [x] vitest 单测（67 例，`packages/strix-tools/test/core.test.ts`）+ kebab/adapt 自测（7 例，`scripts/adapt_skills.py --self-test`，CI 内）
+- [x] vitest 单测（70 例，`packages/strix-tools/test/core.test.ts`）+ kebab/adapt 自测（7 例，`scripts/adapt_skills.py --self-test`，CI 内）
 - [x] `.github/workflows/ci.yml`（build + test + adapt 自测，node 20/22，windows+ubuntu）
 - [x] SECURITY.md / CONTRIBUTING.md（根目录；safety.md 的"to be added"已指向 SECURITY.md）
 - [x] 英文版 docs（`docs/en/` 全覆盖：tools-reference + walkthrough + DEVELOPMENT + architecture + prompt-design + skills-catalog + 双 analysis；safety 本身即英文原文）

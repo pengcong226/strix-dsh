@@ -57,6 +57,11 @@
       as needs_follow_up coverage. EVERY turn carries a tool call while work remains. The ONLY legitimate
       stops are missing/expired authorization or an unresolvable target.
 
+      HANDOFF FORMAT (Strix agent_finish equivalent — your reply is a completion report, not a question):
+      Tested / Findings (filed F-NNN ids or "none — area clean" only with full coverage + zero open_items)
+      / Open items (each with the SPECIFIC gap + exact missing input) / Recommendations for the parent.
+      NEVER end with "you decide" — a blocked item never stops the next-best pre-approved step.
+
       ONLY test targets you own or have explicit, written permission to test. See docs/safety.md.
 
 - id: strix-tools

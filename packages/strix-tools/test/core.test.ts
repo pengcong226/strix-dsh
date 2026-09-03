@@ -16,7 +16,7 @@ import { formatDepFinding, parseOsvVuln, sortDepFindings } from '../src/tools/de
 import { parseRawRequest } from '../src/tools/http.js'
 import { SEVERITIES, VULN_TYPES, checkDuplicate, listFindings, missingFinishSections, validateFinding } from '../src/tools/finding.js'
 import { readLedger, writeLedger } from '../src/tools/coverage.js'
-import { authorizationPath, isAuthorizationExpired, readAuthorization, renderAuthorizationSection } from '../src/tools/authorization.js'
+import { authorizationPath, isAuthorizationExpired, matchesPreApprovedPost, readAuthorization, renderAuthorizationSection } from '../src/tools/authorization.js'
 import { budgetPath, checkBudget, formatUsd, priceUsage, readBudget } from '../src/tools/budget.js'
 import { buildBackgroundDockerArgs, jobLabel } from '../src/lib/jobs.js'
 import { mirrorEvent } from '../src/lib/session-mirror.js'
@@ -365,12 +365,23 @@ describe('methodology autonomy discipline', () => {
   it('keeps the Strix-derived no-question rule with dsh turn semantics', () => {
     const text = methodologySection(scratchConfig())
     expect(text).toContain('AUTONOMY')
-    expect(text).toContain('YOUR TURN ENDS THE MOMENT YOU REPLY WITH PLAIN TEXT')
+    expect(text).toContain('YOUR TURN ENDS THE MOMENT YOU REPLY WITH PLAIN')
     expect(text).toContain('NEVER end a turn with a question')
     expect(text).toContain('EVERY')
     expect(text).toContain('tool call while work remains')
     expect(text).toContain('(1) use issued test')
-    expect(text).toContain('strix_authorization, not via questions')
+    expect(text).toContain('strix_authorization')
+    expect(text).toContain('not via')
+  })
+
+  it('carries the approval-or-act tree and turn-close template', () => {
+    const text = methodologySection(scratchConfig())
+    expect(text).toContain('APPROVAL-OR-ACT DECISION TREE')
+    expect(text).toContain('pre_approved_post_paths')
+    expect(text).toContain('USE IT WITHOUT ASKING')
+    expect(text).toContain('TURN-CLOSE TEMPLATE')
+    expect(text).toContain('never')
+    expect(text).toContain('bare text')
   })
 })
 
@@ -457,6 +468,41 @@ describe('authorization attestation', () => {
     expect(text).toContain('EXPIRED')
     expect(text).toContain('passive reconnaissance')
     expect(text).not.toContain('most useful in-scope validation step')
+  })
+
+  it('matches pre-approved POST paths exactly, honoring expiry', () => {
+    const auth = {
+      targets: ['https://example.com'],
+      granted_by: 'test',
+      recorded_at: 't0',
+      pre_approved_post_paths: [
+        { path: '/oas/forgetPassword', body: 'username-existence-probe' },
+        { path: '/api/echo', body: '*' },
+      ],
+    }
+    expect(matchesPreApprovedPost(auth, '/oas/forgetPassword', 'username-existence-probe')).toBe(true)
+    expect(matchesPreApprovedPost(auth, '/api/echo', 'anything-at-all')).toBe(true)
+    expect(matchesPreApprovedPost(auth, '/oas/forgetPassword', 'different-body')).toBe(false)
+    expect(matchesPreApprovedPost(auth, '/other/path', 'username-existence-probe')).toBe(false)
+    expect(matchesPreApprovedPost(null, '/oas/forgetPassword', 'username-existence-probe')).toBe(false)
+    expect(matchesPreApprovedPost({ targets: [], granted_by: 'x', recorded_at: 't0' }, '/a', 'b')).toBe(false)
+    const expired = { ...auth, valid_until: '2020-01-01T00:00:00.000Z' }
+    expect(matchesPreApprovedPost(expired, '/oas/forgetPassword', 'username-existence-probe')).toBe(false)
+  })
+
+  it('renders pre-approved POST paths into the prompt section', () => {
+    const config = scratchConfig()
+    writeFileSync(
+      authorizationPath(config),
+      JSON.stringify({
+        targets: ['https://example.com'],
+        granted_by: 'test harness',
+        pre_approved_post_paths: [{ path: '/oas/forgetPassword', body: 'username-existence-probe' }],
+        recorded_at: 't0',
+      }),
+      'utf8',
+    )
+    expect(renderAuthorizationSection(config)).toContain('Pre-approved POST paths (1)')
   })
 
   it('treats missing or unparsable expiry as non-expiring', () => {

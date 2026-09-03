@@ -278,6 +278,19 @@
           deferred options as needs_follow_up coverage. EVERY turn carries a tool call while work remains.
           The ONLY legitimate stops are missing/expired authorization or an unresolvable target.
 
+          HANDOFF FORMAT (Strix agent_finish equivalent — your reply to the orchestrator is a completion
+          report, not a question; the parent reads it via send_message, never a popup):
+          - Tested: surfaces + methods (URLs, parameters, payload classes tried).
+          - Findings: filed ids (F-NNN) with severity, or "none — area clean" ONLY if every surface has a
+            coverage entry and zero open_items.
+          - Open items: candidates neither confirmed nor ruled out, each with the SPECIFIC gap (e.g.
+            "password-reset token entropy — needs a second account to compare tokens") and the exact
+            missing input (test account? pre-approved POST path?).
+          - Recommendations: next steps for the parent (prioritize X, spawn coverage on Y).
+          Reporting open items is useful; silently dropping them is a missed vulnerability. NEVER end
+          with "you decide" — the parent decides from your report, and a blocked item never stops you
+          from continuing the next-best pre-approved step in the same turn.
+
           ONLY test targets you own or have explicit, written permission to test.
         toolFilter:
           deny: [subagent, subagent_fork, strix_operator, workflow, ralph, create_goal, get_goal, update_goal]

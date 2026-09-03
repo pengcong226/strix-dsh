@@ -8,6 +8,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { writeFileSync } from 'node:fs'
 import type { ConfigType } from '../config.js'
 import { safeWorkspacePath, truncate, workspaceSub } from '../lib/util.js'
+import { matchesPreApprovedPost, readAuthorization } from './authorization.js'
 
 interface HttpArgs {
   url?: string
@@ -150,7 +151,9 @@ export function registerHttp(ctx: Context, config: ConfigType) {
       description:
         'Send a raw HTTP request with full control (method, headers, body, or a complete raw request text) '
         + 'and inspect the response. The replay workflow from Strix: use it to reproduce and validate '
-        + 'suspected issues with concrete evidence. Only for authorized targets.',
+        + 'suspected issues with concrete evidence. POSTs matching authorization.json pre_approved_post_paths '
+        + '(exact path + body) proceed WITHOUT asking — the clearance is stamped in the output. '
+        + 'Only for authorized targets.',
       parameters: {
         url: { type: 'string', description: 'Target URL. Omit when raw_request includes an absolute request target.' },
         method: { type: 'string', description: 'HTTP method. Default GET.' },
@@ -180,6 +183,23 @@ export function registerHttp(ctx: Context, config: ConfigType) {
         const url = parsed?.url ?? args.url
         if (!url) return 'Error: no target. Provide url, or a raw_request with an absolute request line or Host header.'
 
+        const method = (parsed?.method ?? args.method ?? 'GET').toUpperCase()
+        const body = parsed?.body ?? args.body ?? ''
+        // Pre-approved POST fast path (Strix autonomy enabler): when the
+        // operator cleared this exact path + body in authorization.json, the
+        // POST proceeds WITHOUT asking — the clearance line below is the
+        // audit trail. Non-matching POSTs behave exactly as before.
+        let preApprovedNote = ''
+        if (method === 'POST') {
+          try {
+            const urlObj = new URL(url)
+            if (matchesPreApprovedPost(readAuthorization(config), urlObj.pathname, body)) {
+              preApprovedNote = `\n[pre-approved POST ${urlObj.pathname} — operator clearance in authorization.json, proceeded without asking]`
+            }
+          } catch {
+            /* unparsable URL: no pre-approval match, proceed normally */
+          }
+        }
         const sent = await sendHttpRequest(config, {
           url,
           method: parsed?.method ?? args.method,
@@ -188,15 +208,15 @@ export function registerHttp(ctx: Context, config: ConfigType) {
           followRedirects: args.follow_redirects,
           timeoutMs: args.timeout_ms,
         })
-        if (!args.save_to || !sent.ok) return sent.text
+        if (!args.save_to || !sent.ok) return `${sent.text}${preApprovedNote}`
         const dir = workspaceSub(config, 'responses')
         const target = safeWorkspacePath(dir, args.save_to)
-        if (!target) return `${sent.text}\nREJECTED: save_to must be a relative path inside workspace/responses/ (no .., no absolute paths).`
+        if (!target) return `${sent.text}${preApprovedNote}\nREJECTED: save_to must be a relative path inside workspace/responses/ (no .., no absolute paths).`
         const { dirname } = await import('node:path')
         const { mkdirSync } = await import('node:fs')
         mkdirSync(dirname(target), { recursive: true })
         writeFileSync(target, sent.rawBody, 'utf8')
-        return `${sent.text}\n[full body saved to ${target}]`
+        return `${sent.text}${preApprovedNote}\n[full body saved to ${target}]`
       },
     }),
   )
