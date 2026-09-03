@@ -1,0 +1,17 @@
+# Development reference clones (never published)
+upstream/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Run artifacts
+strix_runs/
+findings/
+workspace/
+*.log
+
+# Engagement workspace (active copy lives in ~/.dsh/strix-workspace)
+strix-workspace/
+evidence/

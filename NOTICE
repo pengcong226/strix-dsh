@@ -1,0 +1,35 @@
+StriX-DH
+Copyright 2026 StriX-DH contributors
+
+This product includes software developed as part of the StriX-DH project.
+
+==============================================================================
+Third-party components
+==============================================================================
+
+1. Strix (https://github.com/usestrix/strix)
+   Licensed under the Apache License, Version 2.0.
+   Copyright 2025 Strix contributors.
+
+   StriX-DH adapts and extends concepts, methodology, prompts, and skill
+   content from the Strix AI penetration-testing platform. Adapted material
+   includes (with modifications):
+   - Agent system prompt structure and behavioral rules
+     (upstream: strix/agents/prompts/system_prompt.jinja)
+   - System-prompt skill resolution/assembly approach
+     (upstream: strix/agents/prompt.py)
+   - Vulnerability knowledge packages
+     (upstream: strix/skills/**)
+   See docs/prompt-design.md for a per-file adaptation map.
+
+2. DeepSeek Harness / dsh (https://github.com/deepseek-ai/deepseek-harness)
+   Licensed under the MIT License.
+   Copyright DeepSeek AI.
+
+   StriX-DH is a bundle of plugins for the dsh agent harness and depends on
+   the dsh runtime, Cordis framework, and dsh tool APIs.
+
+3. Nuclear-grade engines invoked (not bundled) at runtime, each remaining
+   under its own license: nmap, subfinder, httpx, nuclei, naabu, ffuf,
+   katana, semgrep, and others. Users are responsible for complying with
+   those licenses when installing them.

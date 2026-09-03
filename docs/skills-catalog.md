@@ -1,0 +1,114 @@
+# StriX-DH 技能目录（75 个知识包）
+
+> 全部改编自 Strix 上游 `strix/skills/**`（Apache-2.0，出处标注在每个文件头部）。
+模型经 dsh 原生 `skill` 工具按需加载；本目录由 `scripts/adapt_skills.py` 生成。
+
+## analysis（4）
+
+- **`counterevidence`** — Closure discipline for security findings — what counts as proof of safety, what does not, and how to record an unresolved candidate instead of silently dropping it
+- **`fix-verification`** — How to verify a proposed code fix before shipping it — the ordered gates, what disqualifies a fix, and when to withhold the suggestion instead
+- **`severity-calibration`** — Qualitative rubric for what actually deserves high/critical severity, and an acceptance checklist to apply before rating a finding
+- **`source-aware-discovery`** — Enumeration discipline for reading code — which locations to keep as separate candidates, which safe siblings prove nothing, and the per-family sweeps that are routinely missed
+
+## cloud（4）
+
+- **`aws`** — AWS cloud security testing covering IAM misconfigurations, S3 exposure, metadata abuse, and privilege escalation paths
+- **`azure`** — Microsoft Azure and Entra security testing covering RBAC, Privileged Identity Management, Conditional Access, service principals, managed identities, Storage SAS, Key Vault, workload escalation, and cross-plane privilege paths
+- **`gcp`** — GCP cloud security testing covering IAM misconfigurations, public storage buckets, metadata abuse, and service account privilege escalation
+- **`kubernetes`** — Kubernetes cluster security testing - RBAC, API exposure, container escapes, network policies, secrets, and supply chain
+
+## coordination（2）
+
+- **`root-agent`** — Orchestration layer that coordinates specialized subagents for security assessments
+- **`source-aware-whitebox`** — Coordination playbook for source-aware white-box testing with static triage and dynamic validation
+
+## custom（4）
+
+- **`api-spec-testing`** — Spec-driven API pentesting — systematically exercise every endpoint from an ingested OpenAPI/Swagger/Postman inventory for authz, injection, and business-logic flaws
+- **`dependency-cve-scanning`** — Supply-chain / SCA playbook — scan repository lockfiles for known dependency CVEs and report them with create_dependency_report (no dynamic PoC required)
+- **`npx-confusion`** — Test package and executable identity confusion in npx, npm exec, and bunx fallback, plus explicit auto-fetch runners such as pnpm/yarn dlx and deno run npm:, with runner-specific resolution analysis, registry-state controls, reporting gates, and false-positive elimination
+- **`source-aware-sast`** — Practical source-aware SAST and AST playbook for semgrep, ast-grep, gitleaks, and trivy fs
+
+## frameworks（4）
+
+- **`django`** — Security testing playbook for Django applications covering ORM injection, middleware gaps, auth/session flaws, and template issues
+- **`fastapi`** — Security testing playbook for FastAPI applications covering ASGI, dependency injection, and API vulnerabilities
+- **`nestjs`** — Security testing playbook for NestJS applications covering guards, pipes, decorators, module boundaries, and multi-transport auth
+- **`nextjs`** — Security testing playbook for Next.js covering App Router, Server Actions, RSC, and Edge runtime vulnerabilities
+
+## protocols（2）
+
+- **`graphql`** — GraphQL security testing covering introspection, resolver injection, batching attacks, and authorization bypass
+- **`oauth`** — OAuth 2.0 and OIDC flow security testing covering redirect manipulation, token leakage, PKCE bypass, and client misconfiguration
+
+## reconnaissance（2）
+
+- **`asset-discovery`** — Passive asset and attack-surface discovery via certificate transparency, TLS SAN pivoting, passive DNS, and ASN/IP enumeration to find hosts beyond subdomain brute force
+- **`infrastructure-lifecycle`** — Discovery and security analysis of abandoned or ownership-drifted infrastructure trusted by software, firmware, DNS, mail, update systems, packages, scripts, telemetry, and deployed agents
+
+## scan_modes（4）
+
+- **`deep`** — Exhaustive security assessment with maximum coverage, depth, and vulnerability chaining
+- **`diff`** — Methodology for diff-scoped review of a pull request, commit, or branch — what counts as in scope, how far to follow a change, and what not to report
+- **`quick`** — Time-boxed rapid assessment targeting high-impact vulnerabilities
+- **`standard`** — Balanced security assessment with systematic methodology and full attack surface coverage
+
+## technologies（7）
+
+- **`active-directory`** — Active Directory / Kerberos domain testing covering roasting, delegation abuse, AD CS (ESC1-ESC17), NTLM coercion+relay, DACL abuse, and credential dumping
+- **`auth0`** — Auth0 tenant security testing covering misconfigured rules/actions, scope escalation, MFA bypass, and cross-application token confusion
+- **`electron-desktop-apps`** — Test Electron desktop applications across renderer, preload, IPC, main-process, navigation, custom-protocol, storage, permission, and update trust boundaries; use for packaged Electron apps, ASAR review, web-to-native capability analysis, and Electron-specific exploit chains
+- **`firebase`** — Firebase security testing covering Firestore, Storage rules, Realtime Database, Auth, Functions, and client-side trust issues
+- **`grafana-prometheus`** — Grafana, Prometheus, Alertmanager and exporter security testing — turning exposed observability into SSRF, credential theft, RCE, and lateral movement into the internal network
+- **`llm-applications`** — "End-to-end security testing for LLM, RAG, embedding, agent, and model-serving applications. Covers the OWASP Top 10 for LLM Applications 2026 (LLM01-LLM10): prompt injection, sensitive disclosure, excessive agency, supply chain, data/model poisoning, unbounded consumption, misinformation, hidden context exposure, vector weaknesses, and improper output handling. Use for architecture mapping, source review, black-box testing, and complete LLM application assessments."
+- **`supabase`** — Supabase security testing covering Row Level Security, PostgREST, Edge Functions, and service key exposure
+
+## tooling（13）
+
+- **`agent-browser`** — agent-browser CLI for headless Chrome via shell. Snapshot-and-ref workflow, click/fill/extract, screenshots, multi-tab, multi-session, network mocking. Pre-installed in the sandbox; invoke via exec_command.
+- **`ffuf`** — ffuf fuzzing syntax with matcher/filter strategy and non-interactive defaults.
+- **`httpx`** — ProjectDiscovery httpx probing syntax, exact probe flags, and automation-safe output patterns.
+- **`hurl`** — Reproducible, reviewable HTTP request chains and response assertions with Hurl for authorized multi-step security validation, vulnerable-versus-fixed regression cases, captured values, and low-rate semantic oracles
+- **`hypothesis`** — Property-based local differential testing with Hypothesis for parsers, canonicalizers, serializers, validators, routers, and other pure functions, emphasizing explicit invariants, shrinking, reproducibility, and bounded resource use
+- **`katana`** — Katana crawler syntax, depth/js/known-files behavior, and stable concurrency controls.
+- **`naabu`** — Naabu port-scanning syntax with host input, scan-type, verification, and rate controls.
+- **`nmap`** — Canonical Nmap CLI syntax, two-pass scanning workflow, and sandbox-safe bounded scan patterns.
+- **`nuclei`** — Exact Nuclei command structure, template selection, and bounded high-throughput execution controls.
+- **`python`** — Run Python through exec_command in the SDK sandbox. Use the image-baked caido_api module for Caido proxy automation from Python scripts.
+- **`semgrep`** — Exact Semgrep CLI structure, metrics-off scanning, scoped ruleset selection, and automation-safe output patterns.
+- **`sqlmap`** — sqlmap target syntax, non-interactive execution, and common validation/enumeration workflows.
+- **`subfinder`** — Subfinder passive subdomain enumeration syntax, source controls, and pipeline-ready output patterns.
+
+## vulnerabilities（29）
+
+- **`agentic-system-security`** — Security testing for authorized AI agents and MCP-style tool ecosystems, covering effective authority, tool/resource/prompt inventory, confused-deputy behavior, side-effect authorization, cross-tenant isolation, executable component supply chain, shadow integrations, and repeatable safety regression
+- **`argument-injection`** — Test shell-free command argument injection across argv builders and CLI parsers, including option smuggling, response/config-file parsing, argument-boundary reparsing, and Windows Unicode-to-ANSI Best-Fit transformations
+- **`authentication-jwt`** — JWT and OIDC security testing covering token forgery, algorithm confusion, and claim manipulation
+- **`broken-function-level-authorization`** — BFLA testing for action-level authorization failures across endpoints, admin functions, and API operations
+- **`browser-security`** — Browser-internals security testing for browsing-context relationships, postMessage, client-side path traversal, XS-Leaks, service workers, Web Workers, navigation behavior, CSP interactions, caches, and cross-origin state machines
+- **`business-logic`** — Business logic testing for workflow bypass, state manipulation, and domain invariant violations
+- **`csrf`** — CSRF testing covering token bypass, SameSite cookies, CORS misconfigurations, and state-changing request abuse
+- **`header-injection`** — HTTP header injection testing covering CRLF / response splitting, cache poisoning, Host-header confusion, cookie fixation, and proxy / forwarding header smuggling
+- **`http-request-smuggling`** — HTTP request smuggling testing covering CL.TE, TE.CL, H2.CL, H2.TE, and HTTP/2 desync techniques with practical detection and exploitation methodology
+- **`idor`** — IDOR/BOLA testing for object-level authorization failures and cross-account data access
+- **`information-disclosure`** — Information disclosure testing covering error messages, debug endpoints, metadata leakage, and source exposure
+- **`insecure-deserialization`** — Insecure deserialization testing for Java, Python, PHP, .NET, Ruby, and Node.js covering gadget chains, type confusion, and safe validation
+- **`insecure-file-uploads`** — File upload security testing covering extension bypass, content-type manipulation, and path traversal
+- **`llm-prompt-injection`** — "Deep testing for OWASP LLM01:2026 prompt injection in LLM, RAG, multimodal, memory, and tool-using applications, including direct/indirect injection, jailbreaks, instruction smuggling, and downstream impact validation. Use llm_applications for full OWASP 2026 LLM01-LLM10 coverage."
+- **`mass-assignment`** — Mass assignment testing for unauthorized field binding and privilege escalation via API parameters
+- **`nosql-injection`** — NoSQL injection testing covering MongoDB operator injection, authentication bypass, blind extraction, GraphQL variable injection, and Redis/DynamoDB/Elasticsearch/Neo4j-specific attack surfaces
+- **`open-redirect`** — Open redirect testing for phishing pivots, OAuth token theft, and allowlist bypass
+- **`path-traversal-lfi-rfi`** — Path traversal and file inclusion testing for local/remote file access and code execution
+- **`prototype-pollution`** — Client and server prototype pollution testing covering JavaScript object merge bugs, Node.js RCE chains, and filter bypasses
+- **`race-conditions`** — Race condition testing for TOCTOU bugs, double-spend, and concurrent state manipulation
+- **`rce`** — RCE testing covering command injection, deserialization, template injection, and code evaluation
+- **`semantic-confusion`** — Cross-component semantic confusion testing for parser differentials, normalization mismatches, overloaded fields, lifecycle state drift, internal redirects, protocol translation, and validator-to-sink inconsistencies
+- **`sql-injection`** — SQL injection testing covering union, blind, error-based, and ORM bypass techniques
+- **`ssrf`** — SSRF testing for cloud metadata access, internal service discovery, and protocol smuggling
+- **`ssti`** — Server-side template injection across Jinja / Mako / Velocity / Freemarker / Thymeleaf / Twig / Handlebars / EJS / ERB with engine fingerprinting, sandbox escape, and RCE gadget chains
+- **`subdomain-takeover`** — Subdomain takeover testing for dangling DNS records and unclaimed cloud resources
+- **`weak-password-detection`** — Weak password detection, credential stuffing, and brute-force testing using common passwords, system-generated credentials, and HTTP fuzzing / NSE brute-force tooling
+- **`xss`** — XSS testing covering reflected, stored, and DOM-based vectors with CSP bypass techniques
+- **`xxe`** — XXE testing for external entity injection, file disclosure, and SSRF via XML parsers
+
+合计：75 个技能。

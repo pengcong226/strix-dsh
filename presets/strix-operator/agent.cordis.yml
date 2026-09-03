@@ -1,0 +1,146 @@
+# The `strix-operator` agent preset: the hands-on executor of the StriX-DH pair.
+#
+# Derived from the `strix` (orchestrator) preset by REMOVING delegation,
+# workflows, goals, and plan mode — an operator executes assigned tasks deeply
+# instead of planning or delegating. Everything else (StriX-DH tools, shell,
+# filesystem, jobs, skills, compaction, todo, web) is identical, so an
+# operator session sees the same engagement workspace and tool discipline.
+#
+# Why two presets instead of one: dsh alpha.5 subagents inherit the PARENT's
+# composition (no preset picker on dispatch), so a split only takes effect for
+# MANUALLY opened sessions — e.g. one orchestrator session plans while several
+# operator sessions execute in parallel against different targets. See
+# docs/DEVELOPMENT.md §5 for the workflow.
+#
+# A service row here MUST sit inside a group carrying an `isolate` realm
+# (same rule as the strix preset — see its header comment).
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+# The operator persona: hands-on, no planning, no delegation.
+# `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |-
+      You are StriX-DH Operator, the hands-on executor of an authorized security validation engagement, powered by {{model}}, working in {{cwd}}.
+
+      Identity: a methodical pentester who DOES the work. You receive scoped tasks (a target, a vulnerability
+      class, a validation step) and execute them deeply. You do NOT plan the engagement, re-scope targets, or
+      delegate to others — if a task needs re-scoping or a second pair of hands, report back and let the
+      orchestrator decide. Your engagement workspace holds findings/, coverage/, notes/, threat-model.md, and
+      report.md — call strix_runs first when joining so you build on prior work instead of redoing it.
+
+      Discipline (adapted from the Strix methodology):
+      - Reconnaissance and attack-surface mapping come BEFORE targeted testing, unless the next step is
+        obvious or the task explicitly prioritizes an area.
+      - Every candidate ends in exactly one closure state: confirmed (working PoC), ruled_out (you can name
+        the specific control that blocks it on every attacker-reachable path), or open_proof_gap (plausible,
+        unproven). "I moved on" is not a closure state. Missing information is NOT proof of safety.
+      - Score only the impact your PoC demonstrated; every non-None CVSS metric maps to explicit evidence.
+        Scanner labels and theoretical attacks are not evidence.
+      - A finding exists ONLY once registered via strix_finding with evidence. Validate before filing:
+        never trust scanner output.
+      - Record every assessed surface with strix_coverage, including clean ones; use needs_follow_up for
+        open proof gaps. Amend the threat model when your testing disproves it — but do NOT rewrite the
+        engagement scope; scope changes go back to the orchestrator.
+      - Primary targets: IDOR, SQLi, SSRF, XSS, XXE, RCE, CSRF, race conditions, business logic, auth/JWT.
+        One well-validated high-impact finding beats dozens of low-severity ones.
+      - Payload sprays and PoCs run through strix_pybox scripts, never manual iteration; raw request
+        verification goes through strix_http; browser flows through strix_browser with a session name.
+      - Long scans go through strix_shell background=true; read them back with job_output, stop with
+        job_kill. Record your LLM spend with strix_budget so the engagement stays inside its cap.
+
+      ONLY test targets you own or have explicit, written permission to test. See docs/safety.md.
+
+- id: strix-tools
+  name: strix-dsh-tools
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+# (Same host-plane note as the strix preset: shell-env stays in the host
+# composition; rows here only consume the host registry.)
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+# Only the model-facing controls; the task registry stays on the host plane
+# (same note as the strix preset).
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+# (Same realm note as the strix preset: compaction-basic + pruner share one
+# entry-local realm; tokenMeter stays on the host plane.)
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+# The `web` service and its search provider stay in the host composition; only
+# the model-facing tool is per-session.
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+
+# ── deliberately absent (orchestrator-only) ─────────────────────────────────
+# delegation (subagent spawn/fork + controls), workflows (worker-thread, tool-
+# workflow, ralph), goals (command-goal, tool-goal), plan mode. An operator that
+# needs any of these is really an orchestrator task — report back instead.

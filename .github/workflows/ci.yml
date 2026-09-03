@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20', '22']
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: packages/strix-tools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: packages/strix-tools/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --run
+      - name: adapt_skills self-test (kebab/mapping)
+        working-directory: .
+        run: python scripts/adapt_skills.py --self-test

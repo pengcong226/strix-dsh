@@ -1,0 +1,5 @@
+# StriX-DH bundle layer: registers the offensive-security tool plugin.
+# Rows reference this package by name so Node resolution finds the installed code.
+- insert:
+    - id: strix-tools
+      name: strix-dsh-tools

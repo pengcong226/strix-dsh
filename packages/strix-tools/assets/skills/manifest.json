@@ -1,0 +1,527 @@
+[
+  {
+    "name": "counterevidence",
+    "description": "Closure discipline for security findings — what counts as proof of safety, what does not, and how to record an unresolved candidate instead of silently dropping it",
+    "category": "analysis",
+    "upstream": "strix/strix/skills/analysis/counterevidence.md",
+    "file": "counterevidence.md"
+  },
+  {
+    "name": "fix-verification",
+    "description": "How to verify a proposed code fix before shipping it — the ordered gates, what disqualifies a fix, and when to withhold the suggestion instead",
+    "category": "analysis",
+    "upstream": "strix/strix/skills/analysis/fix_verification.md",
+    "file": "fix-verification.md"
+  },
+  {
+    "name": "severity-calibration",
+    "description": "Qualitative rubric for what actually deserves high/critical severity, and an acceptance checklist to apply before rating a finding",
+    "category": "analysis",
+    "upstream": "strix/strix/skills/analysis/severity_calibration.md",
+    "file": "severity-calibration.md"
+  },
+  {
+    "name": "source-aware-discovery",
+    "description": "Enumeration discipline for reading code — which locations to keep as separate candidates, which safe siblings prove nothing, and the per-family sweeps that are routinely missed",
+    "category": "analysis",
+    "upstream": "strix/strix/skills/analysis/source_aware_discovery.md",
+    "file": "source-aware-discovery.md"
+  },
+  {
+    "name": "aws",
+    "description": "AWS cloud security testing covering IAM misconfigurations, S3 exposure, metadata abuse, and privilege escalation paths",
+    "category": "cloud",
+    "upstream": "strix/strix/skills/cloud/aws.md",
+    "file": "aws.md"
+  },
+  {
+    "name": "azure",
+    "description": "Microsoft Azure and Entra security testing covering RBAC, Privileged Identity Management, Conditional Access, service principals, managed identities, Storage SAS, Key Vault, workload escalation, and cross-plane privilege paths",
+    "category": "cloud",
+    "upstream": "strix/strix/skills/cloud/azure.md",
+    "file": "azure.md"
+  },
+  {
+    "name": "gcp",
+    "description": "GCP cloud security testing covering IAM misconfigurations, public storage buckets, metadata abuse, and service account privilege escalation",
+    "category": "cloud",
+    "upstream": "strix/strix/skills/cloud/gcp.md",
+    "file": "gcp.md"
+  },
+  {
+    "name": "kubernetes",
+    "description": "Kubernetes cluster security testing - RBAC, API exposure, container escapes, network policies, secrets, and supply chain",
+    "category": "cloud",
+    "upstream": "strix/strix/skills/cloud/kubernetes.md",
+    "file": "kubernetes.md"
+  },
+  {
+    "name": "root-agent",
+    "description": "Orchestration layer that coordinates specialized subagents for security assessments",
+    "category": "coordination",
+    "upstream": "strix/strix/skills/coordination/root_agent.md",
+    "file": "root-agent.md"
+  },
+  {
+    "name": "source-aware-whitebox",
+    "description": "Coordination playbook for source-aware white-box testing with static triage and dynamic validation",
+    "category": "coordination",
+    "upstream": "strix/strix/skills/coordination/source_aware_whitebox.md",
+    "file": "source-aware-whitebox.md"
+  },
+  {
+    "name": "api-spec-testing",
+    "description": "Spec-driven API pentesting — systematically exercise every endpoint from an ingested OpenAPI/Swagger/Postman inventory for authz, injection, and business-logic flaws",
+    "category": "custom",
+    "upstream": "strix/strix/skills/custom/api_spec_testing.md",
+    "file": "api-spec-testing.md"
+  },
+  {
+    "name": "dependency-cve-scanning",
+    "description": "Supply-chain / SCA playbook — scan repository lockfiles for known dependency CVEs and report them with create_dependency_report (no dynamic PoC required)",
+    "category": "custom",
+    "upstream": "strix/strix/skills/custom/dependency_cve_scanning.md",
+    "file": "dependency-cve-scanning.md"
+  },
+  {
+    "name": "npx-confusion",
+    "description": "Test package and executable identity confusion in npx, npm exec, and bunx fallback, plus explicit auto-fetch runners such as pnpm/yarn dlx and deno run npm:, with runner-specific resolution analysis, registry-state controls, reporting gates, and false-positive elimination",
+    "category": "custom",
+    "upstream": "strix/strix/skills/custom/npx_confusion.md",
+    "file": "npx-confusion.md"
+  },
+  {
+    "name": "source-aware-sast",
+    "description": "Practical source-aware SAST and AST playbook for semgrep, ast-grep, gitleaks, and trivy fs",
+    "category": "custom",
+    "upstream": "strix/strix/skills/custom/source_aware_sast.md",
+    "file": "source-aware-sast.md"
+  },
+  {
+    "name": "django",
+    "description": "Security testing playbook for Django applications covering ORM injection, middleware gaps, auth/session flaws, and template issues",
+    "category": "frameworks",
+    "upstream": "strix/strix/skills/frameworks/django.md",
+    "file": "django.md"
+  },
+  {
+    "name": "fastapi",
+    "description": "Security testing playbook for FastAPI applications covering ASGI, dependency injection, and API vulnerabilities",
+    "category": "frameworks",
+    "upstream": "strix/strix/skills/frameworks/fastapi.md",
+    "file": "fastapi.md"
+  },
+  {
+    "name": "nestjs",
+    "description": "Security testing playbook for NestJS applications covering guards, pipes, decorators, module boundaries, and multi-transport auth",
+    "category": "frameworks",
+    "upstream": "strix/strix/skills/frameworks/nestjs.md",
+    "file": "nestjs.md"
+  },
+  {
+    "name": "nextjs",
+    "description": "Security testing playbook for Next.js covering App Router, Server Actions, RSC, and Edge runtime vulnerabilities",
+    "category": "frameworks",
+    "upstream": "strix/strix/skills/frameworks/nextjs.md",
+    "file": "nextjs.md"
+  },
+  {
+    "name": "graphql",
+    "description": "GraphQL security testing covering introspection, resolver injection, batching attacks, and authorization bypass",
+    "category": "protocols",
+    "upstream": "strix/strix/skills/protocols/graphql.md",
+    "file": "graphql.md"
+  },
+  {
+    "name": "oauth",
+    "description": "OAuth 2.0 and OIDC flow security testing covering redirect manipulation, token leakage, PKCE bypass, and client misconfiguration",
+    "category": "protocols",
+    "upstream": "strix/strix/skills/protocols/oauth.md",
+    "file": "oauth.md"
+  },
+  {
+    "name": "asset-discovery",
+    "description": "Passive asset and attack-surface discovery via certificate transparency, TLS SAN pivoting, passive DNS, and ASN/IP enumeration to find hosts beyond subdomain brute force",
+    "category": "reconnaissance",
+    "upstream": "strix/strix/skills/reconnaissance/asset_discovery.md",
+    "file": "asset-discovery.md"
+  },
+  {
+    "name": "infrastructure-lifecycle",
+    "description": "Discovery and security analysis of abandoned or ownership-drifted infrastructure trusted by software, firmware, DNS, mail, update systems, packages, scripts, telemetry, and deployed agents",
+    "category": "reconnaissance",
+    "upstream": "strix/strix/skills/reconnaissance/infrastructure_lifecycle.md",
+    "file": "infrastructure-lifecycle.md"
+  },
+  {
+    "name": "deep",
+    "description": "Exhaustive security assessment with maximum coverage, depth, and vulnerability chaining",
+    "category": "scan_modes",
+    "upstream": "strix/strix/skills/scan_modes/deep.md",
+    "file": "deep.md"
+  },
+  {
+    "name": "diff",
+    "description": "Methodology for diff-scoped review of a pull request, commit, or branch — what counts as in scope, how far to follow a change, and what not to report",
+    "category": "scan_modes",
+    "upstream": "strix/strix/skills/scan_modes/diff.md",
+    "file": "diff.md"
+  },
+  {
+    "name": "quick",
+    "description": "Time-boxed rapid assessment targeting high-impact vulnerabilities",
+    "category": "scan_modes",
+    "upstream": "strix/strix/skills/scan_modes/quick.md",
+    "file": "quick.md"
+  },
+  {
+    "name": "standard",
+    "description": "Balanced security assessment with systematic methodology and full attack surface coverage",
+    "category": "scan_modes",
+    "upstream": "strix/strix/skills/scan_modes/standard.md",
+    "file": "standard.md"
+  },
+  {
+    "name": "active-directory",
+    "description": "Active Directory / Kerberos domain testing covering roasting, delegation abuse, AD CS (ESC1-ESC17), NTLM coercion+relay, DACL abuse, and credential dumping",
+    "category": "technologies",
+    "upstream": "strix/strix/skills/technologies/active_directory.md",
+    "file": "active-directory.md"
+  },
+  {
+    "name": "auth0",
+    "description": "Auth0 tenant security testing covering misconfigured rules/actions, scope escalation, MFA bypass, and cross-application token confusion",
+    "category": "technologies",
+    "upstream": "strix/strix/skills/technologies/auth0.md",
+    "file": "auth0.md"
+  },
+  {
+    "name": "electron-desktop-apps",
+    "description": "Test Electron desktop applications across renderer, preload, IPC, main-process, navigation, custom-protocol, storage, permission, and update trust boundaries; use for packaged Electron apps, ASAR review, web-to-native capability analysis, and Electron-specific exploit chains",
+    "category": "technologies",
+    "upstream": "strix/strix/skills/technologies/electron_desktop_apps.md",
+    "file": "electron-desktop-apps.md"
+  },
+  {
+    "name": "firebase",
+    "description": "Firebase security testing covering Firestore, Storage rules, Realtime Database, Auth, Functions, and client-side trust issues",
+    "category": "technologies",
+    "upstream": "strix/strix/skills/technologies/firebase.md",
+    "file": "firebase.md"
+  },
+  {
+    "name": "grafana-prometheus",
+    "description": "Grafana, Prometheus, Alertmanager and exporter security testing — turning exposed observability into SSRF, credential theft, RCE, and lateral movement into the internal network",
+    "category": "technologies",
+    "upstream": "strix/strix/skills/technologies/grafana_prometheus.md",
+    "file": "grafana-prometheus.md"
+  },
+  {
+    "name": "llm-applications",
+    "description": "\"End-to-end security testing for LLM, RAG, embedding, agent, and model-serving applications. Covers the OWASP Top 10 for LLM Applications 2026 (LLM01-LLM10): prompt injection, sensitive disclosure, excessive agency, supply chain, data/model poisoning, unbounded consumption, misinformation, hidden context exposure, vector weaknesses, and improper output handling. Use for architecture mapping, source review, black-box testing, and complete LLM application assessments.\"",
+    "category": "technologies",
+    "upstream": "strix/strix/skills/technologies/llm_applications.md",
+    "file": "llm-applications.md"
+  },
+  {
+    "name": "supabase",
+    "description": "Supabase security testing covering Row Level Security, PostgREST, Edge Functions, and service key exposure",
+    "category": "technologies",
+    "upstream": "strix/strix/skills/technologies/supabase.md",
+    "file": "supabase.md"
+  },
+  {
+    "name": "agent-browser",
+    "description": "agent-browser CLI for headless Chrome via shell. Snapshot-and-ref workflow, click/fill/extract, screenshots, multi-tab, multi-session, network mocking. Pre-installed in the sandbox; invoke via exec_command.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/agent_browser.md",
+    "file": "agent-browser.md"
+  },
+  {
+    "name": "ffuf",
+    "description": "ffuf fuzzing syntax with matcher/filter strategy and non-interactive defaults.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/ffuf.md",
+    "file": "ffuf.md"
+  },
+  {
+    "name": "httpx",
+    "description": "ProjectDiscovery httpx probing syntax, exact probe flags, and automation-safe output patterns.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/httpx.md",
+    "file": "httpx.md"
+  },
+  {
+    "name": "hurl",
+    "description": "Reproducible, reviewable HTTP request chains and response assertions with Hurl for authorized multi-step security validation, vulnerable-versus-fixed regression cases, captured values, and low-rate semantic oracles",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/hurl.md",
+    "file": "hurl.md"
+  },
+  {
+    "name": "hypothesis",
+    "description": "Property-based local differential testing with Hypothesis for parsers, canonicalizers, serializers, validators, routers, and other pure functions, emphasizing explicit invariants, shrinking, reproducibility, and bounded resource use",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/hypothesis.md",
+    "file": "hypothesis.md"
+  },
+  {
+    "name": "katana",
+    "description": "Katana crawler syntax, depth/js/known-files behavior, and stable concurrency controls.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/katana.md",
+    "file": "katana.md"
+  },
+  {
+    "name": "naabu",
+    "description": "Naabu port-scanning syntax with host input, scan-type, verification, and rate controls.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/naabu.md",
+    "file": "naabu.md"
+  },
+  {
+    "name": "nmap",
+    "description": "Canonical Nmap CLI syntax, two-pass scanning workflow, and sandbox-safe bounded scan patterns.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/nmap.md",
+    "file": "nmap.md"
+  },
+  {
+    "name": "nuclei",
+    "description": "Exact Nuclei command structure, template selection, and bounded high-throughput execution controls.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/nuclei.md",
+    "file": "nuclei.md"
+  },
+  {
+    "name": "python",
+    "description": "Run Python through exec_command in the SDK sandbox. Use the image-baked caido_api module for Caido proxy automation from Python scripts.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/python.md",
+    "file": "python.md"
+  },
+  {
+    "name": "semgrep",
+    "description": "Exact Semgrep CLI structure, metrics-off scanning, scoped ruleset selection, and automation-safe output patterns.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/semgrep.md",
+    "file": "semgrep.md"
+  },
+  {
+    "name": "sqlmap",
+    "description": "sqlmap target syntax, non-interactive execution, and common validation/enumeration workflows.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/sqlmap.md",
+    "file": "sqlmap.md"
+  },
+  {
+    "name": "subfinder",
+    "description": "Subfinder passive subdomain enumeration syntax, source controls, and pipeline-ready output patterns.",
+    "category": "tooling",
+    "upstream": "strix/strix/skills/tooling/subfinder.md",
+    "file": "subfinder.md"
+  },
+  {
+    "name": "agentic-system-security",
+    "description": "Security testing for authorized AI agents and MCP-style tool ecosystems, covering effective authority, tool/resource/prompt inventory, confused-deputy behavior, side-effect authorization, cross-tenant isolation, executable component supply chain, shadow integrations, and repeatable safety regression",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/agentic_system_security.md",
+    "file": "agentic-system-security.md"
+  },
+  {
+    "name": "argument-injection",
+    "description": "Test shell-free command argument injection across argv builders and CLI parsers, including option smuggling, response/config-file parsing, argument-boundary reparsing, and Windows Unicode-to-ANSI Best-Fit transformations",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/argument_injection.md",
+    "file": "argument-injection.md"
+  },
+  {
+    "name": "authentication-jwt",
+    "description": "JWT and OIDC security testing covering token forgery, algorithm confusion, and claim manipulation",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/authentication_jwt.md",
+    "file": "authentication-jwt.md"
+  },
+  {
+    "name": "broken-function-level-authorization",
+    "description": "BFLA testing for action-level authorization failures across endpoints, admin functions, and API operations",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/broken_function_level_authorization.md",
+    "file": "broken-function-level-authorization.md"
+  },
+  {
+    "name": "browser-security",
+    "description": "Browser-internals security testing for browsing-context relationships, postMessage, client-side path traversal, XS-Leaks, service workers, Web Workers, navigation behavior, CSP interactions, caches, and cross-origin state machines",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/browser_security.md",
+    "file": "browser-security.md"
+  },
+  {
+    "name": "business-logic",
+    "description": "Business logic testing for workflow bypass, state manipulation, and domain invariant violations",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/business_logic.md",
+    "file": "business-logic.md"
+  },
+  {
+    "name": "csrf",
+    "description": "CSRF testing covering token bypass, SameSite cookies, CORS misconfigurations, and state-changing request abuse",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/csrf.md",
+    "file": "csrf.md"
+  },
+  {
+    "name": "header-injection",
+    "description": "HTTP header injection testing covering CRLF / response splitting, cache poisoning, Host-header confusion, cookie fixation, and proxy / forwarding header smuggling",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/header_injection.md",
+    "file": "header-injection.md"
+  },
+  {
+    "name": "http-request-smuggling",
+    "description": "HTTP request smuggling testing covering CL.TE, TE.CL, H2.CL, H2.TE, and HTTP/2 desync techniques with practical detection and exploitation methodology",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/http_request_smuggling.md",
+    "file": "http-request-smuggling.md"
+  },
+  {
+    "name": "idor",
+    "description": "IDOR/BOLA testing for object-level authorization failures and cross-account data access",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/idor.md",
+    "file": "idor.md"
+  },
+  {
+    "name": "information-disclosure",
+    "description": "Information disclosure testing covering error messages, debug endpoints, metadata leakage, and source exposure",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/information_disclosure.md",
+    "file": "information-disclosure.md"
+  },
+  {
+    "name": "insecure-deserialization",
+    "description": "Insecure deserialization testing for Java, Python, PHP, .NET, Ruby, and Node.js covering gadget chains, type confusion, and safe validation",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/insecure_deserialization.md",
+    "file": "insecure-deserialization.md"
+  },
+  {
+    "name": "insecure-file-uploads",
+    "description": "File upload security testing covering extension bypass, content-type manipulation, and path traversal",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/insecure_file_uploads.md",
+    "file": "insecure-file-uploads.md"
+  },
+  {
+    "name": "llm-prompt-injection",
+    "description": "\"Deep testing for OWASP LLM01:2026 prompt injection in LLM, RAG, multimodal, memory, and tool-using applications, including direct/indirect injection, jailbreaks, instruction smuggling, and downstream impact validation. Use llm_applications for full OWASP 2026 LLM01-LLM10 coverage.\"",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/llm_prompt_injection.md",
+    "file": "llm-prompt-injection.md"
+  },
+  {
+    "name": "mass-assignment",
+    "description": "Mass assignment testing for unauthorized field binding and privilege escalation via API parameters",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/mass_assignment.md",
+    "file": "mass-assignment.md"
+  },
+  {
+    "name": "nosql-injection",
+    "description": "NoSQL injection testing covering MongoDB operator injection, authentication bypass, blind extraction, GraphQL variable injection, and Redis/DynamoDB/Elasticsearch/Neo4j-specific attack surfaces",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/nosql_injection.md",
+    "file": "nosql-injection.md"
+  },
+  {
+    "name": "open-redirect",
+    "description": "Open redirect testing for phishing pivots, OAuth token theft, and allowlist bypass",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/open_redirect.md",
+    "file": "open-redirect.md"
+  },
+  {
+    "name": "path-traversal-lfi-rfi",
+    "description": "Path traversal and file inclusion testing for local/remote file access and code execution",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/path_traversal_lfi_rfi.md",
+    "file": "path-traversal-lfi-rfi.md"
+  },
+  {
+    "name": "prototype-pollution",
+    "description": "Client and server prototype pollution testing covering JavaScript object merge bugs, Node.js RCE chains, and filter bypasses",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/prototype_pollution.md",
+    "file": "prototype-pollution.md"
+  },
+  {
+    "name": "race-conditions",
+    "description": "Race condition testing for TOCTOU bugs, double-spend, and concurrent state manipulation",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/race_conditions.md",
+    "file": "race-conditions.md"
+  },
+  {
+    "name": "rce",
+    "description": "RCE testing covering command injection, deserialization, template injection, and code evaluation",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/rce.md",
+    "file": "rce.md"
+  },
+  {
+    "name": "semantic-confusion",
+    "description": "Cross-component semantic confusion testing for parser differentials, normalization mismatches, overloaded fields, lifecycle state drift, internal redirects, protocol translation, and validator-to-sink inconsistencies",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/semantic_confusion.md",
+    "file": "semantic-confusion.md"
+  },
+  {
+    "name": "sql-injection",
+    "description": "SQL injection testing covering union, blind, error-based, and ORM bypass techniques",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/sql_injection.md",
+    "file": "sql-injection.md"
+  },
+  {
+    "name": "ssrf",
+    "description": "SSRF testing for cloud metadata access, internal service discovery, and protocol smuggling",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/ssrf.md",
+    "file": "ssrf.md"
+  },
+  {
+    "name": "ssti",
+    "description": "Server-side template injection across Jinja / Mako / Velocity / Freemarker / Thymeleaf / Twig / Handlebars / EJS / ERB with engine fingerprinting, sandbox escape, and RCE gadget chains",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/ssti.md",
+    "file": "ssti.md"
+  },
+  {
+    "name": "subdomain-takeover",
+    "description": "Subdomain takeover testing for dangling DNS records and unclaimed cloud resources",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/subdomain_takeover.md",
+    "file": "subdomain-takeover.md"
+  },
+  {
+    "name": "weak-password-detection",
+    "description": "Weak password detection, credential stuffing, and brute-force testing using common passwords, system-generated credentials, and HTTP fuzzing / NSE brute-force tooling",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/weak_password_detection.md",
+    "file": "weak-password-detection.md"
+  },
+  {
+    "name": "xss",
+    "description": "XSS testing covering reflected, stored, and DOM-based vectors with CSP bypass techniques",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/xss.md",
+    "file": "xss.md"
+  },
+  {
+    "name": "xxe",
+    "description": "XXE testing for external entity injection, file disclosure, and SSRF via XML parsers",
+    "category": "vulnerabilities",
+    "upstream": "strix/strix/skills/vulnerabilities/xxe.md",
+    "file": "xxe.md"
+  }
+]
