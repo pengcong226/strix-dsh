@@ -7,6 +7,25 @@
 
 现状：`strix-dsh` 没有漏洞数据库。`skills/vulnerabilities/` 29 包是**方法论**（某类漏洞怎么测），不是可检索的 CVE 库；`strix_finding` 登记的是自己打出的发现；`dependency_cve` 类型是空架子，无数据源。
 
+### A-0. 搜索引擎调研结论（2026-09-03，无子代理，直调 WebFetch + curl 实测）
+
+**结论先行：没有比 OSV/KEV/EPSS 免费三件套更优的方案；MCP 这条路是空的。**
+
+| 排名 | 方案 | 证据 | 结论 |
+|---|---|---|---|
+| 1 | OSV.dev（`POST /v1/query` + `/v1/querybatch` + `GET /v1/vulns/{id}`） | OSV 官方文档站确认端点形态；curl 实测 lodash@4.17.20 返回 GHSA-29mw-wpgm-hmr9 全文；无 key、无 auth | 主源，无可替代 |
+| 2 | CISA KEV（`known_exploited_vulnerabilities.json`） | curl 实测 catalogVersion 2026.09.02、count 1694；无 key | "被野外利用"过滤器，提级依据 |
+| 3 | EPSS（`api.first.org/data/v1/epss?cve=`） | curl 实测 Log4Shell epss 0.99999/percentile 1.0；public 无 key | 优先级排序 |
+| 4 | deps.dev API v3 | 搜索确认存在且免费无 key（依赖图谱最强，补传递依赖）；本轮未 curl，由 A-2 实现时实测为准 | OSV 搭档，非替代 |
+| 5 | NVD API 2.0 | 文档站被 JS 挡住未读到数字；已知要 key、延迟大、返回臃肿 | 兜底 enrichment，不做主源 |
+| 6 | GitHub Advisory | 文档页未读到数字；要 token；与 OSV（含 GHSA 源）重复建设 | 暂不接（`gh` 已登录，真要用时零成本） |
+| — | 通用漏洞 MCP server | mcp.so 该分类 "No servers in this category yet"；glama.ai 搜 Shodan/VirusTotal/Censys/NVD/CVE/OSV/nuclei/exploit **零命中**；Bing 全网搜 OSV/NVD/KEV MCP 无结果 | 此路不通：自己写 `strix_depcheck` 直调 REST |
+| — | Nuclei 官方 MCP | 全网搜只有 nuclei 仓库/官网/文档，无官方 MCP | 同上；消费方式=A-1（命名卷+模板更新） |
+| — | Exploit-DB 官方 API | 搜索未证实官方 API 存在（只有"备好 API 接口"的二手说法，无路径无 spec） | 不纳入；exploit 侧靠 nuclei 模板 + 手工 PoC |
+| — | Snyk/Vulners API | 搜索未证实免费档 endpoint/auth/quota；都要 key | 免费三件套覆盖 90% 场景后暂不碰 |
+
+搜索过程诚实记录：DuckDuckGo 直接 bot-check 拦截；Bing RSS 可用但摘要稀疏；NVD/GitHub/EPSS 官方文档页多为 JS 渲染或 404，WebFetch 读不到数字——凡未读到数字的一律标"已知/未证实"而不编造。决定性证据是三条亲手 curl（OSV/KEV/EPSS 全通），与 A-2 原方案一致：**一个 `strix_depcheck` 工具按 OSV→KEV→EPSS 顺序查，deps.dev 补传递依赖，全部无 key**。
+
 ### A-1. Nuclei 模板库常驻更新 🟡
 
 - **背景**：`strix_sast` 跑 nuclei 容器（`projectdiscovery/nuclei` 镜像，`--rm` 一次性），模板版本=拉镜像那天；模板上游（`projectdiscovery/nuclei-templates`）社区每天合新 CVE 检测模板。
