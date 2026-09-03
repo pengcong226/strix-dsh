@@ -6,7 +6,7 @@ StriX-DH takes the offensive-security methodology of [Strix](https://github.com/
 
 > ⚠️ **Authorized use only.** Only run the tools against systems you own or have explicit, written permission to test. You are responsible for compliance. See [docs/safety.md](docs/safety.md).
 
-## Tools (12)
+## Tools (16)
 
 | Tool | Strix origin | Purpose |
 |---|---|---|
@@ -25,6 +25,7 @@ StriX-DH takes the offensive-security methodology of [Strix](https://github.com/
 | `strix_recon` | recon phase | subfinder → httpx orchestration (status/title/tech), results on disk |
 | `strix_sast` | nuclei/semgrep | Rate-limited template scanning + static analysis; scanner output is a lead, never a finding |
 | `strix_proxy` | Caido proxy workflow | Mitmproxy sidecar (Docker): intercept, query flows, replay via strix_http path |
+| `strix_depcheck` | — (new in 0.10.0) | Dependency CVE lookup: OSV.dev → CISA KEV (exploited in the wild) → EPSS (priority), all keyless; 24h-cached KEV catalog; emits the exact fields `strix_finding create vulnerability_type=dependency_cve` needs |
 
 Beyond the tools, `strix:methodology` and `strix:authorization` sections are contributed to the system
 prompt (closure discipline, CVSS-evidence binding, ten primary vulnerability
@@ -42,7 +43,7 @@ Prerequisites: Node.js ≥ 20, dsh (`npx @deepseek-ai/dsh` or global install).
 ```sh
 dsh plugin --profile web add ./packages/strix-tools
 npx -y @deepseek-ai/dsh web --no-open
-# boot log line 1: [strix-dsh-tools] registered 15 tool modules (15 tools) + methodology + authorization sections + 75 skills
+# boot log line 1: [strix-dsh-tools] registered 16 tool modules + methodology + authorization sections + 75 skills
 # WebUI: http://127.0.0.1:3080/?token=<from boot log>
 ```
 
