@@ -46,18 +46,21 @@ MAPPINGS: list[tuple[str, str]] = [
     (r"load_skill", "skill"),
     # 编排（dsh 原生）
     (r"create_agent", "subagent"),
-    (r"wait_for_agents", "subagent 后台运行+通知（dsh 原生）"),
-    (r"view_agent_graph", "agent 状态总览（dsh 原生）"),
-    (r"send_message_to_agent", "send_message（dsh 原生）"),
-    (r"stop_agent", "interrupt_agent（dsh 原生）"),
+    (r"wait_for_agents", "subagent background mode + completion notification (dsh native)"),
+    (r"view_agent_graph", "agent status overview (dsh native)"),
+    (r"send_message_to_agent", "send_message (dsh native)"),
+    (r"stop_agent", "interrupt_agent (dsh native)"),
     # 生命周期（dsh 无对应工具，turn 自然结束）
-    (r"finish_scan", "完成收尾（汇总报告并结束任务）"),
-    (r"agent_finish", "完成子任务（汇报结果并结束）"),
-    (r"respond_to_user", "直接回复用户（dsh 原生 turn 语义）"),
+    (r"finish_scan", "strix_report finish (close the engagement)"),
+    (r"agent_finish", "handoff report (complete the subtask)"),
+    (r"respond_to_user", "plain-text reply (dsh native turn semantics)"),
     # Caido 代理
     (r"caido_api", "strix_http"),
-    (r"list_requests", "strix_http 重放与捕获"),
-    (r"proxy history", "striX-DH 捕获的请求记录"),
+    # (list_requests → 中文短语) removed: a Chinese phrase is not a valid
+    # Python identifier and leaked into code samples. Point at the native
+    # tool name instead.
+    (r"list_requests", "strix_proxy list"),
+    (r"proxy history", "captured request records (strix_proxy list)"),
 ]
 
 HEADER = """<!--
@@ -93,6 +96,14 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def main() -> None:
+    # Missing-source guard: an absent or empty upstream tree must FAIL loudly,
+    # not silently write an empty manifest (which would wipe the bundled
+    # skills on the next regeneration).
+    if not SRC.is_dir():
+        raise SystemExit(f"upstream skills source not found: {SRC} — clone usestrix/strix first")
+    md_files = [p for p in sorted(SRC.rglob("*.md")) if p.name != "README.md"]
+    if not md_files:
+        raise SystemExit(f"upstream skills source has no .md files: {SRC} — wrong checkout?")
     OUT.mkdir(parents=True, exist_ok=True)
     manifest = []
     seen_names: set[str] = set()
@@ -159,6 +170,17 @@ if __name__ == "__main__":
             def test_unmapped_passthrough(self):
                 self.assertEqual(adapt_body("plain text"), "plain text")
 
-        unittest.main(argv=[sys.argv[0]], exit=False)
+            def test_replacements_are_ascii_identifiers(self):
+                # Regression: a mapping once emitted a Chinese phrase that is
+                # not a valid identifier and corrupted Python code samples.
+                for pat, repl in MAPPINGS:
+                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.()\[\]= -]*", pat):
+                        # Replacement used in code contexts must stay ASCII.
+                        self.assertTrue(
+                            repl.isascii(),
+                            f"non-ASCII replacement for {pat!r}: {repl!r}",
+                        )
+
+        unittest.main(argv=[sys.argv[0]])
     else:
         main()

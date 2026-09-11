@@ -329,7 +329,7 @@ pybox-ok sandbox-verification
 | 参数 | 说明 |
 |---|---|
 | `action` | navigate / click / fill / evaluate / screenshot / content / close |
-| `session` | 会话名（默认 default；仅字母/数字/横线/下划线/点）——**并发 agent 必须各用独立 session**，否则导航互相失效；session 存于插件进程内存，同进程多 engagement 共享，跨 engagement 必须换名 |
+| `session` | 会话名（默认 default；仅字母/数字/横线/下划线/点）。**会话是持久的（0.12.1）**：一个 session = 一个 BrowserContext + 一个长生命周期 Page，导航状态、cookie、localStorage 跨调用保持——登录一次后可在后续调用里 fill/click/screenshot；close（或插件卸载）才销毁。**并发 agent 必须各用独立 session**；session 存于插件进程内存，同进程多 engagement 共享，跨 engagement 必须换名 |
 | `url` / `selector` / `value` / `wait_until` / `full_page` | 按 action |
 
 **输出**：navigate 返回页面标题；screenshot 保存 `workspace/screenshots/<session>-<ts>.png` 并返回路径（用 dsh 原生 `read_image` 查看）；content 返回截断 HTML。

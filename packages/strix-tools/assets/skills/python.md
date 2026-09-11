@@ -1,111 +1,93 @@
 <!--
 Adapted for StriX-DH from the Strix project (https://github.com/usestrix/strix),
-licensed under the Apache License, Version 2.0. Tool names and lifecycle
-references have been remapped to StriX-DH native tools and dsh primitives.
-Modifications © 2026 StriX-DH contributors, Apache-2.0.
+licensed under the Apache License, Version 2.0. Rewritten for the native
+strix_pybox / strix_shell tools — the upstream sandbox Python module and
+Caido SDK bindings do not exist here. Modifications © 2026 StriX-DH
+contributors, Apache-2.0.
 -->
 
 # Python In The Sandbox
 
-Use `strix_shell` for Python. There is no separate Python executor.
+Two native tools run Python — never mix them up:
 
-Prefer writing reusable scripts to a `.py` file and running them with
-`python3 <name>.py`. For short one-off transformations, `python3 -c` or a
-small here-document is fine.
+- **strix_pybox**: purpose-built for exploit scripts. Pass the script text in
+  `script`, extra files in `files`, CLI args in `arguments`, pip packages in
+  `install_packages`. Runs in a one-shot container; the run directory
+  (workspace/pybox/run-*) keeps main.py, args, and output for evidence.
+- **strix_shell**: general commands, including `python3 -c '...'` one-liners
+  and `python3 script.py` for files already in the workspace (the workspace is
+  mounted at /workspace).
 
-The `shell` parameter on `strix_shell` is for swapping POSIX shells
-(`bash`/`zsh`/`sh`), not for picking interpreters. Put the interpreter
-invocation in `cmd` instead: `cmd="python3 -c '...'"`, not
-`shell=python3, cmd="..."`. The `shell=<interpreter>` shortcut breaks
-in subtle ways — `python3` works only with `login=False` (because the
-SDK adds `-l`/`-i`), and other interpreters (`node`, `ruby`, `perl`)
-take `-e` not `-c` so they fail even with `login=False`.
+Prefer strix_pybox for payload sprays and PoC scripts; prefer strix_shell for
+quick transformations. Both go through the operator approval gate.
 
-## Proxy Automation From Python
+## Writing reusable scripts
 
-The sandbox image includes an installed `strix_http` module. Import it
-explicitly when Python code needs Caido traffic or replay access:
+Write the script to a workspace file once, then run it repeatedly:
+
+```bash
+# strix_shell: python3 /workspace/scripts/retry.py https://target.tld/
+python3 /workspace/scripts/retry.py "$1"
+```
+
+For anything longer than a few lines, strix_pybox with the full script text
+beats shell-quoting gymnastics.
+
+## HTTP from Python
+
+There is no `strix_http` Python module — that was upstream's Caido binding.
+Use the standard library or requests (via `install_packages: ["requests"]` in
+strix_pybox):
 
 ```python
-from strix_http import (
-    strix_http 重放与捕获,
-    list_sitemap,
-    repeat_request,
-    scope_rules,
-    view_request,
-    view_sitemap_entry,
-)
+import requests
+r = requests.post("https://target.tld/login",
+                  data={"username": "probe", "password": "x"},
+                  timeout=10, allow_redirects=False)
+print(r.status_code, r.headers.get("Location"))
 ```
 
-All helpers are async. Use them inside `asyncio.run(...)` or an async
-function:
+For single request/response pairs, prefer the strix_http tool directly — it
+stamps pre-approval/cap audit notes and can save full bodies with `save_to`.
+Use Python only when you need loops, parsing, or state across requests.
+
+## Proxy capture from Python
+
+To work with captured traffic, read the proxy flow files directly from the
+workspace (`proxy/flows.jsonl`, `proxy/flows/<id>.req|.rsp`) — plain JSONL and
+raw text, no SDK needed:
 
 ```python
-import asyncio
-
-from strix_http import strix_http 重放与捕获, view_request
-
-
-async def main():
-    posts = await strix_http 重放与捕获(
-        httpql_filter='req.method.eq:"POST" AND req.path.cont:"/api/"',
-        first=50,
-    )
-    candidates = []
-    for edge in posts.edges:
-        request_id = edge.node.request.id
-        body = await view_request(request_id, part="request")
-        raw = body.request.raw.decode("utf-8", errors="replace")
-        if "id=" in raw or "user=" in raw:
-            candidates.append(request_id)
-
-    print(f"{len(candidates)} candidates")
-    print(candidates[:10])
-
-
-asyncio.run(main())
+import json
+for line in open("/workspace/proxy/flows.jsonl"):
+    f = json.loads(line)
+    if f.get("method") == "POST":
+        print(f["id"], f["url"])
 ```
 
-Available helpers:
-
-- `strix_http 重放与捕获(httpql_filter=, first=50, after=, sort_by=, sort_order=, scope_id=)` returns a cursor-paginated Caido SDK `Connection`.
-- `view_request(request_id, part="request")` returns a Caido SDK request object with raw request/response bytes.
-- `repeat_request(request_id, modifications={...})` replays a captured request after modifying `url`, `params`, `headers`, `body`, or `cookies`.
-- `list_sitemap(scope_id=, parent_id=, depth="DIRECT", page=1)` walks Caido's request-tree view of the discovered surface. Omit `parent_id` for root domains; pass an entry id with `depth="DIRECT"` or `"ALL"` to drill in.
-- `view_sitemap_entry(entry_id)` returns one entry plus its 30 most recent related requests.
-- `scope_rules(action, allowlist=, denylist=, scope_id=, scope_name=)` manages Caido scopes.
-
-For one-off arbitrary requests (e.g. probing a fresh endpoint, hitting an
-external API), use `strix_shell` with `curl` / `httpx` / `requests`. The
-sandbox's `HTTP_PROXY` env routes all such traffic through Caido
-automatically, so it shows up in `strix_http 重放与捕获` and you can use
-`repeat_request` to replay-and-modify any of it.
-
-## Workflow
-
-For iterative exploit work, put code in a file:
-
-```text
-1. Create or edit a task-unique script (e.g. `poc_<task-id>.py`, so it can't
-   clobber a project file or another agent's script) with `apply_patch`.
-2. Run it with `strix_shell`: `python3 poc_<task-id>.py`.
-3. Edit and rerun until the proof-of-concept is reliable.
-```
+Replay a captured request with the strix_proxy tool (`action: "replay"`), or
+re-send it manually via requests using the .req file contents.
 
 ## Installing extra packages
 
-The sandbox's Python lives in `/app/.venv`, and it is the active virtualenv
-(`python3` / `pip` already resolve to it). The following common libraries are
-**pre-installed** — import them directly, no install step needed:
-`requests`, `httpx`, `beautifulsoup4` (`bs4`), `lxml`, `pyjwt` (`jwt`),
-`cryptography`.
+strix_pybox: pass pip specs in `install_packages` (names only — flags like
+`-r`/`--index-url` are rejected). Common picks: `requests`, `httpx`,
+`beautifulsoup4`, `lxml`, `pyjwt`, `cryptography`.
 
-To add a one-off dependency for an exploit script, use `uv` (already in the
-image and much faster than pip):
+strix_shell: the default python:3.12-slim image has no extra packages — pip
+install inside the same command if needed, or use strix_pybox instead.
 
-```bash
-uv pip install --python /app/.venv/bin/python <package>
-```
+## Workflow for iterative exploit work
 
-Plain `pip install <package>` also works because the venv is active. Install
-before you import, so scripts don't fail with `ModuleNotFoundError`.
+1. Keep the script in the workspace under a task-unique name (e.g.
+   `poc_<task-id>.py`) so it cannot clobber another agent's script.
+2. Run it (strix_pybox for full scripts, strix_shell for one-liners).
+3. Edit and rerun until the proof-of-concept is reliable, then cite the file
+   in the finding's `poc_script` field.
+
+## Discipline
+
+- One well-structured script beats a dozen ad-hoc one-liners.
+- Honor the engagement's noise constraints inside scripts too: sleep between
+  requests, cap iterations, never spray faster than the operator allowed.
+- Only against authorized targets.

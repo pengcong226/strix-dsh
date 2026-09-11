@@ -15,3 +15,6 @@ workspace/
 # Engagement workspace (active copy lives in ~/.dsh/strix-workspace)
 strix-workspace/
 evidence/
+__pycache__/
+strix-dsh-REVIEW.pdf
+strix-dsh-REVIEW.md

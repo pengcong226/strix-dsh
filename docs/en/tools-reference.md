@@ -327,7 +327,7 @@ pybox-ok sandbox-verification
 | Parameter | Notes |
 |---|---|
 | `action` | navigate / click / fill / evaluate / screenshot / content / close |
-| `session` | Session name (default default; letters/digits/dash/underscore/dot only) — **concurrent agents must each use their own session**, or navigation invalidates each other; sessions live in plugin process memory shared across engagements in one process, so name them per-engagement |
+| `session` | Session name (default default; letters/digits/dash/underscore/dot only) — **concurrent agents must each use their own session**, or navigation invalidates each other; sessions live in plugin process memory shared across engagements in one process, so name them per-engagement  — **persistent (0.12.1)**: one BrowserContext + long-lived Page per session; navigation, cookies, and localStorage survive between calls (log in once, then fill/click/screenshot later); destroyed only by close (or plugin unload). Concurrent agents must use distinct sessions |
 | `url` / `selector` / `value` / `wait_until` / `full_page` | per action |
 
 **Output**: navigate returns the page title; screenshot saves to `workspace/screenshots/<session>-<ts>.png` and returns the path (view with dsh's native `read_image`); content returns truncated HTML.

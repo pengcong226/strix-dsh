@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ConfigType } from '../src/config.js'
 import { nextIdAmong, nextSequentialId, runProcess, clampTimeoutMs, safeId, safeWorkspacePath, truncate, writeExclusive, writeFileAtomic } from '../src/lib/util.js'
 import { registerBundledSkills } from '../src/skills-provider.js'
@@ -15,7 +15,7 @@ import { checkExtraArgs, SEMGREP_BLOCKED_EXTRA_FLAGS, semgrepTargetAllowed } fro
 import { matchesAutoAllow, splitApprovalSummary } from '../src/lib/approval.js'
 import { methodologySection } from '../src/index.js'
 import { formatDepFinding, parseOsvVuln, readKevCache, sortDepFindings } from '../src/tools/depcheck.js'
-import { parseRawRequest, evaluatePostPolicy, STATE_CHANGING_METHODS } from '../src/tools/http.js'
+import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_METHODS } from '../src/tools/http.js'
 import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, listFindings, missingFinishSections, registerFinding, registerReport, validateFinding } from '../src/tools/finding.js'
 import { OUTCOMES, readLedger, registerCoverage, writeLedger } from '../src/tools/coverage.js'
 import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, registerAuthorization, renderAuthorizationSection, targetCoveredByAuth } from '../src/tools/authorization.js'
@@ -25,7 +25,7 @@ import { strixDhVersion } from '../src/tools/sarif.js'
 import { validPipPackages } from '../src/tools/pybox.js'
 import { buildBackgroundDockerArgs, jobLabel } from '../src/lib/jobs.js'
 import { registerThreatModel } from '../src/tools/threat-model.js'
-import { createSprayGuardHandler, type GuardedRoute } from '../src/tools/browser.js'
+import { createSprayGuardHandler, registerBrowser, type GuardedRoute } from '../src/tools/browser.js'
 import { mirrorEvent } from '../src/lib/session-mirror.js'
 import { filterFlows, formatFlow, pidOwnedByDockerCli, procCmdlineIsDockerCli, proxyImageKey, readFlows, tasklistRowIsDockerCli } from '../src/tools/proxy.js'
 import { buildHttpxArgs, isSafeDomain } from '../src/tools/recon.js'
@@ -1601,5 +1601,141 @@ describe('storage hardening (batch 4)', () => {
     // Must track package.json (not the old hardcoded 0.8.0) and look like semver.
     expect(strixDhVersion()).toMatch(/^\d+\.\d+\.\d+$/)
     expect(strixDhVersion()).not.toBe('0.8.0')
+  })
+})
+
+// ── browser persistent-session integration (real Chromium) ──────────────────
+// Regression for the "browser is not a persistent page session" P0: sessions
+// must keep ONE BrowserContext + Page across calls, so login/fill/click/
+// screenshot sequences work. Skips when playwright or its Chromium binary is
+// unavailable (e.g. CI without `playwright install`); CI installs it.
+
+const chromiumReady = await (async () => {
+  try {
+    const pw = await import('playwright')
+    const b = await pw.chromium.launch({ headless: true })
+    await b.close()
+    return true
+  } catch {
+    return false
+  }
+})()
+
+describe.skipIf(!chromiumReady)('browser persistent session (real Chromium)', () => {
+  const PAGE_HTML = `<!doctype html><html><head><title>strix-dh test page</title></head><body>
+<h1>strix-dh test page</h1>
+<input id="name" placeholder="name">
+<button id="add" onclick="var v=document.getElementById('name').value||'(empty)';var li=document.createElement('li');li.textContent=v;document.getElementById('list').appendChild(li);localStorage.setItem('last',v);document.cookie='clicked=1'">add</button>
+<ul id="list"></ul>
+</body></html>`
+
+  let server: import('node:http').Server | undefined
+  let baseUrl = ''
+  let disposePlugin: (() => void) | undefined
+
+  beforeAll(async () => {
+    const http = await import('node:http')
+    server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(PAGE_HTML)
+    })
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
+    const addr = server!.address()
+    baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`
+  })
+
+  afterAll(async () => {
+    disposePlugin?.()
+    await new Promise<void>((resolve) => server?.close(() => resolve()))
+  })
+
+  function browserTool(config: ConfigType): { execute: (raw: Record<string, unknown>) => Promise<string> } {
+    const captured: Record<string, { execute: (raw: Record<string, unknown>) => Promise<string> }> = {}
+    registerBrowser({
+      tools: { register: (t) => { captured[t.name] = t } },
+      effect: (fn: () => () => void) => { disposePlugin = fn() },
+    } as never, config)
+    return captured.strix_browser!
+  }
+
+  it('keeps page, DOM, localStorage, and cookies across calls in one session', async () => {
+    const config = scratchConfig()
+    const tool = browserTool(config)
+    const s = 'persist-1'
+
+    // 1. navigate
+    await expect(tool.execute({ action: 'navigate', session: s, url: baseUrl })).resolves.toContain('strix-dh test page')
+
+    // 2. fill on the SAME page (would fail on a fresh blank page: no #name)
+    await expect(tool.execute({ action: 'fill', session: s, selector: '#name', value: 'alice' })).resolves.toContain('Filled')
+
+    // 3. click #add — page JS appends <li>, sets localStorage + cookie
+    await expect(tool.execute({ action: 'click', session: s, selector: '#add' })).resolves.toContain('Clicked')
+
+    // 4. evaluate: DOM change from the click survived into this call
+    await expect(tool.execute({ action: 'evaluate', session: s, value: 'document.querySelectorAll("#list li").length + ":" + localStorage.getItem("last") + ":" + document.cookie' })).resolves.toContain('1:alice')
+
+    // 5. content: filled value + appended list item are in the live DOM
+    await expect(tool.execute({ action: 'content', session: s })).resolves.toContain('alice')
+
+    // 6. screenshot lands in workspace/screenshots
+    const out = await tool.execute({ action: 'screenshot', session: s })
+    const m = /Screenshot saved: (.+?.png)/.exec(out)
+    expect(m).toBeTruthy()
+    expect(existsSync(m![1].trim())).toBe(true)
+
+    // 7. close, then a NEW session on the same name starts fresh (no cookie/localStorage bleed)
+    await expect(tool.execute({ action: 'close', session: s })).resolves.toContain('closed')
+    await tool.execute({ action: 'navigate', session: s, url: baseUrl })
+    await expect(tool.execute({ action: 'evaluate', session: s, value: 'localStorage.getItem("last") + ":" + document.cookie' })).resolves.toBe('null:')
+    await tool.execute({ action: 'close', session: s })
+  })
+
+  it('isolates concurrent sessions from each other', async () => {
+    const config = scratchConfig()
+    const tool = browserTool(config)
+
+    await tool.execute({ action: 'navigate', session: 'iso-a', url: baseUrl })
+    await tool.execute({ action: 'navigate', session: 'iso-b', url: baseUrl })
+    await tool.execute({ action: 'evaluate', session: 'iso-a', value: 'localStorage.setItem("who","a")' })
+    await tool.execute({ action: 'evaluate', session: 'iso-b', value: 'localStorage.setItem("who","b")' })
+    await expect(tool.execute({ action: 'evaluate', session: 'iso-a', value: 'localStorage.getItem("who")' })).resolves.toBe('a')
+    await expect(tool.execute({ action: 'evaluate', session: 'iso-b', value: 'localStorage.getItem("who")' })).resolves.toBe('b')
+    await tool.execute({ action: 'close', session: 'iso-a' })
+    await tool.execute({ action: 'close', session: 'iso-b' })
+  })
+})
+
+// ── http timeout covers the body-receiving phase ─────────────────────────────
+// Regression for the "clearTimeout fires when headers arrive" P1: a slow-drip
+// body must still abort at the configured timeout, not hang until the socket
+// closes on its own.
+
+describe('sendHttpRequest timeout covers body reception', () => {
+  it('aborts a slow-drip body at the configured timeout', async () => {
+    const http = await import('node:http')
+    // Headers arrive immediately; the body drips 1 byte/300ms forever.
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      const iv = setInterval(() => res.write('x'), 300)
+      req.on('close', () => clearInterval(iv))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const addr = server.address()
+    const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}/`
+    try {
+      const config = scratchConfig()
+      const started = Date.now()
+      const out = await sendHttpRequest(config, { url, timeoutMs: 1200 })
+      const elapsed = Date.now() - started
+      expect(out.ok).toBe(false)
+      expect(out.text).toMatch(/timeout after 1200ms while receiving the body/)
+      // Aborted by OUR timer, not by the server: well under the drip's
+      // natural lifetime, with generous CI scheduling slack.
+      expect(elapsed).toBeLessThan(10_000)
+    } finally {
+      server.close()
+      server.closeAllConnections?.()
+    }
   })
 })

@@ -5,6 +5,11 @@
  * pages). Actions: navigate, click, fill, evaluate, screenshot, content,
  * close. Playwright is a soft dependency: the tool registers even when
  * playwright isn't installed and fails with actionable guidance at call time.
+ *
+ * A session is a persistent BrowserContext + Page pair: navigation state,
+ * cookies, and localStorage SURVIVE between tool calls within the session
+ * (login → fill → click → screenshot sequences work), until `close` or
+ * plugin unload. The spray-guard is installed once per page at creation.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -78,13 +83,33 @@ export function createSprayGuardHandler(config: ConfigType, notes: string[]): (r
 }
 interface BrowserLike {
   newPage(): Promise<PageLike>
+  newContext(): Promise<ContextLike>
+  close(): Promise<unknown>
+}
+/** Structural half of a Playwright BrowserContext: pages share its cookie jar. */
+interface ContextLike {
+  newPage(): Promise<PageLike>
   close(): Promise<unknown>
 }
 
-const sessions = new Map<string, BrowserLike>()
+interface Session {
+  browser: BrowserLike
+  context: ContextLike
+  page: PageLike
+  /** Spray-guard route installed once per page; later calls reuse it. */
+  guardInstalled: boolean
+}
+
+const sessions = new Map<string, Session>()
 let playwrightUnavailable = false
 
-async function getSession(config: ConfigType, session: string): Promise<BrowserLike> {
+/**
+ * Get or create a session: one BrowserContext + one long-lived Page per
+ * session name. The context keeps cookies/localStorage across calls; the page
+ * keeps navigation state. The spray-guard route is installed on the page once,
+ * at creation — later calls reuse the guarded page.
+ */
+async function getSession(config: ConfigType, session: string): Promise<Session> {
   const existing = sessions.get(session)
   if (existing) return existing
   let pw: typeof import('playwright')
@@ -97,16 +122,19 @@ async function getSession(config: ConfigType, session: string): Promise<BrowserL
     )
   }
   const browser = await pw.chromium.launch({ headless: config.browserHeadless })
-  sessions.set(session, browser)
-  return browser
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const entry: Session = { browser, context, page, guardInstalled: false }
+  sessions.set(session, entry)
+  return entry
 }
 
 export function registerBrowser(ctx: Context, config: ConfigType) {
   // Dispose browsers when the plugin unloads/reloads.
   ctx.effect(() => {
     return () => {
-      for (const browser of sessions.values()) {
-        void browser.close().catch(() => {})
+      for (const entry of sessions.values()) {
+        void entry.browser.close().catch(() => {})
       }
       sessions.clear()
     }
@@ -117,13 +145,14 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
       name: 'strix_browser',
       description:
         'Automated Chromium session (Playwright) for XSS/CSRF/clickjacking/auth-flow validation — the dynamic ' +
-        'half of validation where raw HTTP is not enough. Sessions are isolated per name: use a distinct ' +
-        'session per agent/task so concurrent navigation does not invalidate each other\u2019s pages. Session ' +
-        'names are plain identifiers (letters/digits/dash/underscore/dot); screenshot files derive from them. ' +
-        'Sessions live in this plugin process — parallel engagements sharing one process must use distinct names. ' +
-        'Every page carries the automated spray-guard: browser-fired writes (form submits, XHR/fetch from evaluate) ' +
-        'go through the same pre-approval/cap policy as strix_http with no human involved — over-cap writes are ' +
-        'aborted before they leave and stamped into the action result. ' +
+        'half of validation where raw HTTP is not enough. Sessions are PERSISTENT: one BrowserContext + Page per ' +
+        'session name, so navigation, cookies, and localStorage SURVIVE between calls — login once, then fill/' +
+        'click/screenshot in later calls. Use a distinct session per agent/task so concurrent work does not ' +
+        'invalidate each other\u2019s pages. Session names are plain identifiers (letters/digits/dash/underscore/' +
+        'dot); screenshot files derive from them. Sessions live in this plugin process — parallel engagements ' +
+        'sharing one process must use distinct names. Every page carries the automated spray-guard: browser-fired ' +
+        'writes (form submits, XHR/fetch from evaluate) go through the same pre-approval/cap policy as strix_http ' +
+        'with no human involved — over-cap writes are aborted before they leave and stamped into the action result. ' +
         'Close sessions when done. Only against authorized targets.',
       parameters: {
         action: { type: 'string', required: true, description: 'navigate | click | fill | evaluate | screenshot | content | close' },
@@ -144,40 +173,44 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
         if (!safeId(sessionName)) return `REJECTED: bad session name "${sessionName}" (letters/digits/dash/underscore/dot only).`
 
         if (args.action === 'close') {
-          const browser = sessions.get(sessionName)
-          if (!browser) return `Session "${sessionName}" not open.`
-          await browser.close()
+          const entry = sessions.get(sessionName)
+          if (!entry) return `Session "${sessionName}" not open.`
           sessions.delete(sessionName)
+          await entry.browser.close().catch(() => {})
           return `Session "${sessionName}" closed.`
         }
 
-        let browser: BrowserLike
+        let entry: Session
         try {
-          browser = await getSession(config, sessionName)
+          entry = await getSession(config, sessionName)
         } catch (err) {
           return err instanceof Error ? err.message : String(err)
         }
 
-        const page = await browser.newPage()
+        // The page is long-lived: navigation, cookies, and localStorage from
+        // previous calls in this session are still here.
+        const page = entry.page
         // Automated enforcement, no human: intercept every request the page
         // fires and run writes through the shared spray-guard. Reads take a
-        // fast path; the verdicts accumulate into guardNotes below.
+        // fast path; the verdicts accumulate into guardNotes per call.
         const guardNotes: string[] = []
         const withNotes = (text: string): string =>
           guardNotes.length > 0 ? `${text}\n${guardNotes.join('\n')}` : text
-        if (config.browserEnforcePostPolicy) {
+        if (config.browserEnforcePostPolicy && !entry.guardInstalled) {
           try {
             await page.route('**/*', createSprayGuardHandler(config, guardNotes))
+            entry.guardInstalled = true
           } catch {
             guardNotes.push('Warning: browser spray-guard route could not attach — writes on this page are uncounted.')
           }
         }
-        try {
-          switch (args.action) {
+        switch (args.action) {
             case 'navigate': {
               if (!args.url) return 'REJECTED: url is required for navigate.'
               await page.goto(args.url, { waitUntil: args.wait_until ?? 'load', timeout: 30_000 })
-              const title = await page.evaluate('document.title')
+              // Wrap as an expression: a bare identifier like `document.title`
+              // evaluates to undefined in Playwright's expression context.
+              const title = await page.evaluate<unknown>('(() => document.title)()')
               return withNotes(`Navigated ${args.url} — title: ${title}`)
             }
             case 'click': {
@@ -192,8 +225,16 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
             }
             case 'evaluate': {
               if (!args.value) return 'REJECTED: value (JS expression) is required for evaluate.'
-              const result = await page.evaluate<unknown>(args.value)
-              return withNotes(truncate(typeof result === 'string' ? result : JSON.stringify(result, null, 2), 10_000))
+              // Wrap as an IIFE expression so both statements and plain
+              // expressions work, and undefined/null render as text instead
+              // of crashing truncate (JSON.stringify(undefined) is undefined).
+              const expr = args.value.includes('=>') && !args.value.trim().startsWith('(')
+                ? args.value
+                : `(() => (${args.value}))()`
+              const result = await page.evaluate<unknown>(expr)
+              const rendered =
+                typeof result === 'string' ? result : JSON.stringify(result, null, 2) ?? String(result)
+              return withNotes(truncate(rendered, 10_000))
             }
             case 'screenshot': {
               const dir = workspaceSub(config, 'screenshots')
@@ -207,9 +248,6 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
             }
             default:
               return `Unknown action "${args.action}". Use navigate | click | fill | evaluate | screenshot | content | close.`
-          }
-        } finally {
-          await page.close().catch(() => {})
         }
       },
     }),

@@ -268,13 +268,30 @@ export async function sendHttpRequest(
     const text = `Request failed: ${reason}. Check DNS, scheme (http/https), and port; a refused connection means nothing is listening — treat as unreachable, not as a finding.`
     return { text, ok: false, status: 0, rawBody: '', finalUrl: url }
   }
-  clearTimeout(timer)
 
   const responseHeaders: Record<string, string> = {}
   response.headers.forEach((value, key) => {
     responseHeaders[key] = value
   })
-  const rawBody = await response.text()
+  // The timeout covers the WHOLE exchange: headers + body. The abort signal
+  // stays live through response.text() so a slow-drip or endless body cannot
+  // hang the tool past the configured timeout (previously the timer was
+  // cleared the moment headers arrived).
+  let rawBody: string
+  try {
+    rawBody = await response.text()
+  } catch (err) {
+    clearTimeout(timer)
+    const reason = err instanceof Error ? err.message : String(err)
+    if (reason.includes('abort')) {
+      const text = `Request failed: timeout after ${timeoutMs}ms while receiving the body (aborted). Headers arrived (HTTP ${response.status}); the body stream stalled — treat as an unreliable target, do not retry blindly.`
+      return { text, ok: false, status: 0, rawBody: '', finalUrl: url }
+    }
+    const text = `Request failed while receiving the body: ${reason}. Partial transfer — treat as an unreliable target, not as a finding.`
+    return { text, ok: false, status: 0, rawBody: '', finalUrl: url }
+  } finally {
+    clearTimeout(timer)
+  }
   const durationMs = Date.now() - started
 
   const result: HttpResult = {

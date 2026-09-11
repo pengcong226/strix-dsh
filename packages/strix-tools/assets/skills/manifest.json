@@ -232,7 +232,7 @@
   },
   {
     "name": "agent-browser",
-    "description": "agent-browser CLI for headless Chrome via shell. Snapshot-and-ref workflow, click/fill/extract, screenshots, multi-tab, multi-session, network mocking. Pre-installed in the sandbox; invoke via exec_command.",
+    "description": "Native strix_browser tool (Playwright) core: persistent sessions (cookies/localStorage survive between calls), CSS-selector click/fill, evaluate expressions, screenshots, and the automated spray-guard on browser-fired writes.",
     "category": "tooling",
     "upstream": "strix/strix/skills/tooling/agent_browser.md",
     "file": "agent-browser.md"
@@ -295,7 +295,7 @@
   },
   {
     "name": "python",
-    "description": "Run Python through exec_command in the SDK sandbox. Use the image-baked caido_api module for Caido proxy automation from Python scripts.",
+    "description": "Run Python via strix_pybox (full exploit scripts, files/args/pip packages) or strix_shell (one-liners, workspace scripts at /workspace). HTTP via requests — no Caido SDK here; read proxy/flows.jsonl directly for captured traffic.",
     "category": "tooling",
     "upstream": "strix/strix/skills/tooling/python.md",
     "file": "python.md"

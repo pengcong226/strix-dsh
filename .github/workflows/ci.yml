@@ -24,6 +24,9 @@ jobs:
           cache-dependency-path: packages/strix-tools/package-lock.json
       - run: npm ci
       - run: npm run build
+      # Browser binaries for the persistent-session integration tests
+      # (they self-skip when Chromium is unavailable).
+      - run: npx playwright install chromium --with-deps
       - run: npm test -- --run
       - name: adapt_skills self-test (kebab/mapping)
         working-directory: .
