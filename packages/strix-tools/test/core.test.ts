@@ -4,6 +4,7 @@
  * bounded-output helper. No Docker, no network, no LLM — safe in CI.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -12,7 +13,7 @@ import { nextIdAmong, nextSequentialId, runProcess, clampTimeoutMs, safeId, safe
 import { registerBundledSkills } from '../src/skills-provider.js'
 import { registerNotes } from '../src/tools/notes.js'
 import { checkExtraArgs, SEMGREP_BLOCKED_EXTRA_FLAGS, semgrepTargetAllowed } from '../src/tools/sast.js'
-import { matchesAutoAllow, splitApprovalSummary } from '../src/lib/approval.js'
+import { createApprovalGate, matchesAutoAllow, splitApprovalSummary } from '../src/lib/approval.js'
 import { methodologySection } from '../src/index.js'
 import { formatDepFinding, parseOsvVuln, readKevCache, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_METHODS, normalizePathKey } from '../src/tools/http.js'
@@ -22,7 +23,7 @@ import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreA
 import { bumpPostCount, postCountsPath, readPostCounts } from '../src/tools/http.js'
 import { budgetPath, checkBudget, formatUsd, priceUsage, readBudget, registerBudget } from '../src/tools/budget.js'
 import { strixDhVersion } from '../src/tools/sarif.js'
-import { validPipPackages } from '../src/tools/pybox.js'
+import { validPipPackages, registerPybox } from '../src/tools/pybox.js'
 import { buildBackgroundDockerArgs, jobLabel } from '../src/lib/jobs.js'
 import { registerThreatModel } from '../src/tools/threat-model.js'
 import { createSprayGuardHandler, registerBrowser, type GuardedRoute } from '../src/tools/browser.js'
@@ -1919,4 +1920,134 @@ describe('sendHttpRequest timeout covers body reception', () => {
       server.closeAllConnections?.()
     }
   })
+})
+
+// ── approval gate (createApprovalGate) ────────────────────────────────────────
+// The fail-closed security core behind strix_shell/strix_pybox had ZERO test
+// coverage (review finding): every branch here is a security property.
+
+describe('approval gate (createApprovalGate)', () => {
+  const exec = { name: 'strix_shell', callId: 'call-1', agent: { id: 'agent-1' }, signal: undefined }
+
+  function gateCtx(outcome: string | Error): { ctx: unknown; requests: unknown[] } {
+    const requests: unknown[] = []
+    const ctx = {
+      approval: {
+        request: async (req: unknown) => {
+          requests.push(req)
+          if (outcome instanceof Error) throw outcome
+          return outcome
+        },
+      },
+    }
+    return { ctx, requests }
+  }
+
+  it("gate 'off' grants without asking and logs gate-off to the evidence ledger", async () => {
+    const config = scratchConfig() // approvalGate: 'off' by default
+    const { ctx, requests } = gateCtx('rejected')
+    const decision = await createApprovalGate(ctx as never, config)(exec, 'run "echo t"')
+    expect(decision.granted).toBe(true)
+    expect(requests).toHaveLength(0)
+    expect(readFileSync(join(config.workspaceDir, 'evidence', 'log.jsonl'), 'utf8')).toMatch(/"outcome":"gate-off"/)
+  })
+
+  it('auto-allow pattern grants on the FULL text without asking', async () => {
+    const config = { ...scratchConfig(), approvalGate: 'always' as const, approvalAutoAllow: ['^strix_shell: run "echo'] }
+    const { ctx, requests } = gateCtx('rejected')
+    const decision = await createApprovalGate(ctx as never, config)(exec, 'strix_shell: run "echo t" (network: on)')
+    expect(decision.granted).toBe(true)
+    expect(requests).toHaveLength(0)
+    expect(readFileSync(join(config.workspaceDir, 'evidence', 'log.jsonl'), 'utf8')).toMatch(/"outcome":"auto-allowed"/)
+  })
+
+  it('a pattern matching only the display-truncation marker never grants (display-match regression)', async () => {
+    // The marker text ("[full N chars, sha256:...]") exists ONLY in the
+    // display half. Matching patterns against the display would let a
+    // marker-shaped pattern grant on invisible content — the gate must ask.
+    const config = { ...scratchConfig(), approvalGate: 'always' as const, approvalAutoAllow: ['\\[full \\d+ chars'] }
+    const { ctx, requests } = gateCtx('rejected')
+    const decision = await createApprovalGate(ctx as never, config)(exec, splitApprovalSummary('x'.repeat(500)))
+    expect(decision.granted).toBe(false)
+    expect(requests).toHaveLength(1)
+  })
+
+  it("operator 'allowed-once' grants; rejected/cancelled/unavailable all fail closed", async () => {
+    const config = { ...scratchConfig(), approvalGate: 'always' as const }
+    const ok = gateCtx('allowed-once')
+    const granted = await createApprovalGate(ok.ctx as never, config)(exec, 'run "echo t"')
+    expect(granted.granted).toBe(true)
+    for (const outcome of ['rejected', 'cancelled', 'unavailable']) {
+      const c = gateCtx(outcome)
+      const d = await createApprovalGate(c.ctx as never, config)(exec, 'run "echo t"')
+      expect(d.granted).toBe(false)
+      if (!d.granted) {
+        expect(d.message).toMatch(/DENIED/)
+        expect(d.message).toContain(outcome)
+      }
+    }
+  })
+
+  it('approval service throwing degrades to denied (unavailable), never propagates', async () => {
+    const config = { ...scratchConfig(), approvalGate: 'always' as const }
+    const { ctx } = gateCtx(new Error('boom'))
+    const d = await createApprovalGate(ctx as never, config)(exec, 'run "echo t"')
+    expect(d.granted).toBe(false)
+    if (!d.granted) expect(d.outcome).toBe('unavailable')
+  })
+
+  it('missing agent identity denies without asking (headless fail-closed)', async () => {
+    const config = { ...scratchConfig(), approvalGate: 'always' as const }
+    const { ctx, requests } = gateCtx('allowed-once')
+    const d = await createApprovalGate(ctx as never, config)({ name: 'strix_shell', callId: 'c2' }, 'run "echo t"')
+    expect(d.granted).toBe(false)
+    expect(requests).toHaveLength(0)
+  })
+})
+
+// ── docker integration: the real container path end-to-end ────────────────────
+// Review finding: shell/pybox had only pure-function coverage; the whole
+// dockerRun chain (argv → daemon → cidfile → output capture) was never
+// exercised. These run wherever a Docker daemon answers (CI ubuntu legs;
+// locally with Docker Desktop up) and self-skip otherwise — same pattern as
+// the Chromium integration tests above.
+
+const dockerReady = (() => {
+  try {
+    const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
+      encoding: 'utf8', timeout: 15_000, windowsHide: true,
+    })
+    return r.status === 0 && !!r.stdout.trim()
+  } catch {
+    return false
+  }
+})()
+
+describe.skipIf(!dockerReady)('docker integration: strix_shell / strix_pybox end-to-end', () => {
+  it('strix_shell runs a command in a real container and returns its output', async () => {
+    const config = { ...scratchConfig(), shellTimeoutMs: 60_000, shellNetwork: false }
+    const regs: unknown[] = []
+    registerShell({ tools: { register: (d: unknown) => regs.push(d) } } as never, config)
+    const tool = regs[0] as { execute: (raw: Record<string, unknown>, exec: unknown) => Promise<string> }
+    const out = await tool.execute({ command: 'echo docker-shell-ok' }, { name: 'strix_shell', callId: 'd-1' })
+    expect(out).toMatch(/docker-shell-ok/)
+    expect(out).not.toMatch(/Docker is unavailable/)
+    // Evidence ledger got the run result row.
+    expect(readFileSync(join(config.workspaceDir, 'evidence', 'log.jsonl'), 'utf8')).toMatch(/"kind":"result"/)
+  }, 120_000)
+
+  it('strix_pybox runs a script with files and arguments in the mounted workspace', async () => {
+    const config = { ...scratchConfig(), pyboxTimeoutMs: 60_000, pyboxNetwork: false }
+    const regs: unknown[] = []
+    registerPybox({ tools: { register: (d: unknown) => regs.push(d) } } as never, config)
+    const tool = regs[0] as { execute: (raw: Record<string, unknown>, exec: unknown) => Promise<string> }
+    const out = await tool.execute({
+      script: 'import json\nprint("pybox-" + open("word.txt").read().strip())\nprint("arg=" + json.load(open("args.json"))["k"])',
+      files: { 'word.txt': 'files-ok' },
+      arguments: { k: 'args-ok' },
+    }, { name: 'strix_pybox', callId: 'd-2' })
+    expect(out).toMatch(/pybox-files-ok/)
+    expect(out).toMatch(/arg=args-ok/)
+    expect(out).not.toMatch(/Docker is unavailable/)
+  }, 120_000)
 })
