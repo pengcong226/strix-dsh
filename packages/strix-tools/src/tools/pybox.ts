@@ -15,6 +15,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { createApprovalGate, logEvidence, splitApprovalSummary } from '../lib/approval.js'
+import { checkBudget } from './budget.js'
 import { dockerRun, formatRunResult, safeId, clampTimeoutMs, truncate, workspaceSub } from '../lib/util.js'
 
 /**
@@ -56,6 +57,10 @@ export function registerPybox(ctx: Context, config: ConfigType) {
       },
       async execute(raw: Record<string, unknown>, exec): Promise<string> {
         const args = raw as unknown as { script: string; files?: Record<string, string>; install_packages?: string; timeout_ms?: number; network?: boolean; arguments?: Record<string, unknown> }
+        // Budget gate BEFORE anything else — same rationale as strix_shell:
+        // 'block' must actually refuse the most expensive operations.
+        const budgetGate = checkBudget(config, 'strix_pybox')
+        if (budgetGate.over && config.budgetAction === 'block') return budgetGate.message
         const network = args.network ?? config.pyboxNetwork
         // Operator-configured base packages plus the per-call request share
         // one install line (previously the config key was declared but never
@@ -129,7 +134,8 @@ export function registerPybox(ctx: Context, config: ConfigType) {
         if (result.dockerMissing) {
           return 'Docker is unavailable: install Docker Desktop (or start the daemon) to use strix_pybox. Script saved at ' + runDir
         }
-        return `Run dir: ${runDir}\n${formatRunResult(result, 20_000)}`
+        const text = `Run dir: ${runDir}\n${formatRunResult(result, 20_000)}`
+        return budgetGate.over ? `${budgetGate.message}\n${text}` : text
       },
     }),
   )

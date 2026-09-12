@@ -17,6 +17,12 @@ export interface ConfigType {
   /** strix_http: maximum response body characters returned to the model. */
   httpMaxBodyChars: number
   /**
+   * strix_http: maximum response body BYTES received from the network before
+   * the stream is cancelled (a multi-GB body otherwise flows fully into
+   * memory before httpMaxBodyChars truncates the DISPLAY copy). 0 disables.
+   */
+  httpMaxBodyBytes: number
+  /**
    * strix_http: per-path cap for non-preapproved POSTs sent under a live
    * authorization (spray guard). 0 disables the cap. Persisted in the
    * append-only ledger workspace/http-post-counts.jsonl (plus a read-only
@@ -102,8 +108,10 @@ export interface ConfigType {
   /** strix_budget: price per 1K output tokens in USD. */
   budgetOutputPer1k: number
   /**
-   * strix_budget: what heavy tools (recon/sast) do once the ledger exceeds
-   * the cap — 'warn' prepends a warning and proceeds, 'block' refuses.
+   * strix_budget: what heavy tools do once the ledger exceeds the cap —
+   * 'warn' prepends a warning and proceeds, 'block' refuses. Consulted by
+   * recon/sast/depcheck/proxy-start AND the execution-class tools
+   * (strix_shell/strix_pybox/strix_browser).
    */
   budgetAction: 'warn' | 'block'
 }
@@ -113,6 +121,7 @@ export const Config = z
     workspaceDir: z.string().default(''),
     httpTimeoutMs: z.number().min(1).default(30_000),
     httpMaxBodyChars: z.number().min(1).default(20_000),
+    httpMaxBodyBytes: z.number().min(0).default(2_000_000),
     // min(0): a negative or NaN cap silently disabled the spray guard
     // (cap > 0 checks) — the schema must fail loudly instead, per this
     // repo's own convention.

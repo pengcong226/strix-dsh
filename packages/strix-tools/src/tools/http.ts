@@ -91,7 +91,7 @@ function legacyPostCountsPath(config: ConfigType): string {
   return join(workspaceDir(config), POST_COUNTS_LEGACY_FILE)
 }
 
-/** Tally the append-only ledger. A torn line is skipped, not fatal. */
+/** Tally the append-only ledger. A torn line is skipped, not fatal; a `void` line cancels one claim (see claimPostCount). */
 export function tallyPostLog(config: ConfigType): Record<string, number> {
   const file = postCountsPath(config)
   if (!existsSync(file)) return {}
@@ -105,8 +105,13 @@ export function tallyPostLog(config: ConfigType): Record<string, number> {
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
     try {
-      const parsed = JSON.parse(line) as { path?: unknown }
-      if (typeof parsed?.path === 'string' && parsed.path) {
+      const parsed = JSON.parse(line) as { path?: unknown; void?: unknown }
+      if (typeof parsed?.path !== 'string' || !parsed.path) continue
+      if (parsed.void === true) {
+        // A void line cancels ONE claim (written by claimPostCount when a
+        // concurrent racer already took the last slot). Never below zero.
+        out[parsed.path] = Math.max(0, (out[parsed.path] ?? 0) - 1)
+      } else {
         out[parsed.path] = (out[parsed.path] ?? 0) + 1
       }
     } catch {
@@ -142,19 +147,36 @@ export function readPostCounts(config: ConfigType): Record<string, number> {
 }
 
 /**
- * Record one non-preapproved POST and return the resulting count for that
- * path. The line append is a single `O_APPEND` write — no read-modify-write
- * window — and the count is recomputed from the ledger afterwards, so two
- * concurrent senders both see the true total.
+ * CLAIM one non-preapproved send against the per-path cap and return the
+ * resulting valid count. Claim-then-check, not check-then-bump: the previous
+ * read→decide→append order let two concurrent senders both read `seen < cap`,
+ * both proceed, and both append — the cap was soft by exactly the number of
+ * racers. Here the claim line is appended FIRST and the decision reads the
+ * ledger back: a claim that lands beyond the cap is voided by appending a
+ * `{void:true}` line (tally subtracts it), so at most `cap` valid claims ever
+ * exist per path. Over-refusal under a race (both racers void) is possible —
+ * fail-closed direction. `cap=0` means unlimited (claim always granted).
+ * Filesystem-touching — unit-tested.
  */
-export function bumpPostCount(config: ConfigType, path: string): number {
+export function claimPostCount(config: ConfigType, path: string, cap: number): { granted: boolean; count: number } {
+  const before = readPostCounts(config)[path] ?? 0
+  if (cap > 0 && before >= cap) return { granted: false, count: before }
+  const ts = new Date().toISOString()
   try {
-    appendFileSync(postCountsPath(config), `${JSON.stringify({ ts: new Date().toISOString(), path })}\n`, 'utf8')
+    appendFileSync(postCountsPath(config), `${JSON.stringify({ ts, path })}\n`, 'utf8')
   } catch {
     /* best-effort audit persistence: the send proceeds regardless */
   }
-  const seen = readPostCounts(config)[path] ?? 0
-  return seen > 0 ? seen : 1
+  const after = readPostCounts(config)[path] ?? 0
+  if (cap > 0 && after > cap) {
+    try {
+      appendFileSync(postCountsPath(config), `${JSON.stringify({ ts, path, void: true })}\n`, 'utf8')
+    } catch {
+      /* best-effort: the refused claim stays in the tally (tighter cap) */
+    }
+    return { granted: false, count: after - 1 }
+  }
+  return { granted: true, count: after }
 }
 
 export type PostPolicyOutcome =
@@ -229,19 +251,17 @@ export function evaluatePostPolicy(config: ConfigType, url: string, body: string
         }
       }
       const cap = config.httpPostCapPerPath
-      const counts = readPostCounts(config)
-      const seen = counts[pathKey] ?? 0
-      if (cap > 0 && seen >= cap) {
+      const claim = claimPostCount(config, pathKey, cap)
+      if (!claim.granted) {
         return {
           proceed: false,
-          rejection: `REJECTED: per-path state-changing cap reached for ${pathKey} (${seen}/${cap} non-preapproved sends already made under this attestation). `
+          rejection: `REJECTED: per-path state-changing cap reached for ${pathKey} (${claim.count}/${cap} non-preapproved sends already made under this attestation). `
             + `Record a needs_follow_up coverage entry naming this path and ask the operator to pre-approve it (authorization.json pre_approved_post_paths) or raise the cap — do not retry with reworded bodies or respelled paths.`,
         }
       }
-      const n = bumpPostCount(config, pathKey)
       return {
         proceed: true,
-        note: `\n[non-preapproved ${method} ${pathKey} — live authorization (${auth.targets.join(', ')}), count ${n}/${cap > 0 ? cap : '∞'}, proceeded without asking]`,
+        note: `\n[non-preapproved ${method} ${pathKey} — live authorization (${auth.targets.join(', ')}), count ${claim.count}/${cap > 0 ? cap : '∞'}, proceeded without asking]`,
       }
     }
   } catch {
@@ -304,14 +324,39 @@ export async function sendHttpRequest(
     responseHeaders[key] = value
   })
   // The timeout covers the WHOLE exchange: headers + body. The abort signal
-  // stays live through response.text() so a slow-drip or endless body cannot
+  // stays live through body reception so a slow-drip or endless body cannot
   // hang the tool past the configured timeout (previously the timer was
   // cleared the moment headers arrived).
+  //
+  // The body is received through a byte-bounded stream read, not
+  // response.text(): a multi-GB body otherwise flows fully into memory
+  // before httpMaxBodyChars truncates the DISPLAY copy. At the limit the
+  // stream is cancelled — the connection is torn down, the rest discarded.
+  const maxBytes = config.httpMaxBodyBytes > 0 ? config.httpMaxBodyBytes : Number.POSITIVE_INFINITY
   let rawBody: string
+  let byteCapped = false
   try {
-    rawBody = await response.text()
+    if (response.body && maxBytes !== Number.POSITIVE_INFINITY) {
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let text = ''
+      let received = 0
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        received += value.byteLength
+        text += decoder.decode(value, { stream: true })
+        if (received >= maxBytes) {
+          byteCapped = true
+          await reader.cancel().catch(() => {})
+          break
+        }
+      }
+      rawBody = text + decoder.decode()
+    } else {
+      rawBody = await response.text()
+    }
   } catch (err) {
-    clearTimeout(timer)
     const reason = err instanceof Error ? err.message : String(err)
     if (reason.includes('abort')) {
       const text = `Request failed: timeout after ${timeoutMs}ms while receiving the body (aborted). Headers arrived (HTTP ${response.status}); the body stream stalled — treat as an unreliable target, do not retry blindly.`
@@ -341,6 +386,7 @@ export async function sendHttpRequest(
   const text = [
     `HTTP ${result.status} ${result.status_text} — ${result.duration_ms}ms — ${result.final_url}`,
     headerLines,
+    byteCapped ? `[body reception stopped at ${config.httpMaxBodyBytes} bytes (httpMaxBodyBytes) — the rest was discarded; raise the limit or use a ranged request if you genuinely need more]` : '',
     result.body_truncated ? `[body truncated at ${config.httpMaxBodyChars} chars]` : '',
     '',
     result.body,

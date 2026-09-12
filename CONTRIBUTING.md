@@ -22,7 +22,7 @@
 cd packages/strix-tools
 npm install
 npm run build        # zero errors before anything else
-npm test -- --run    # vitest, 162 tests (browser/docker sections self-skip when unavailable)
+npm test -- --run    # vitest, 172 tests (browser/docker sections self-skip when unavailable)
 cd ../.. && python scripts/adapt_skills.py --self-test
 ```
 

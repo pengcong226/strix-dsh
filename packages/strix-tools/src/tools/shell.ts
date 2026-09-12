@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ConfigType } from '../config.js'
 import { createApprovalGate, logEvidence, splitApprovalSummary } from '../lib/approval.js'
+import { checkBudget } from './budget.js'
 import { newCidFile, startBackgroundShell } from '../lib/jobs.js'
 import { clampTimeoutMs, dockerRun, formatRunResult } from '../lib/util.js'
 
@@ -41,6 +42,12 @@ export function registerShell(ctx: Context, config: ConfigType) {
       },
       async execute(raw: Record<string, unknown>, exec): Promise<string> {
         const args = raw as unknown as { command: string; timeout_ms?: number; image?: string; network?: boolean; workdir?: string; background?: boolean }
+        // Budget gate BEFORE anything else: an execution-class tool is the
+        // most expensive thing an over-budget engagement can do, and 'block'
+        // must actually refuse (previously only recon/sast/depcheck/proxy
+        // consulted the ledger — the config promised more than it enforced).
+        const budgetGate = checkBudget(config, 'strix_shell')
+        if (budgetGate.over && config.budgetAction === 'block') return budgetGate.message
         const image = args.image?.trim() || config.shellImage
         // Format guard in EVERY mode: a `-`-prefixed or whitespace-bearing
         // image would be parsed by docker as a new FLAG (e.g. `--privileged`)
@@ -91,7 +98,8 @@ export function registerShell(ctx: Context, config: ConfigType) {
             exitCode: null,
             durationMs: 0,
           })
-          return `Background job started: ${jobId}. Read streaming output with job_output, list jobs with job_list, stop it with job_kill.`
+          const started = `Background job started: ${jobId}. Read streaming output with job_output, list jobs with job_list, stop it with job_kill.`
+          return budgetGate.over ? `${budgetGate.message}\n${started}` : started
         }
 
         const started = Date.now()
@@ -116,7 +124,8 @@ export function registerShell(ctx: Context, config: ConfigType) {
         const text = formatRunResult(result, 20_000)
         // Honest accounting: killing the local CLI does not stop the daemon
         // container, so a timed-out run is `rm -f`'d — say so explicitly.
-        return result.containerRemoved ? `${text}\n[container removed after timeout — no residual workload]` : text
+        const full = result.containerRemoved ? `${text}\n[container removed after timeout — no residual workload]` : text
+        return budgetGate.over ? `${budgetGate.message}\n${full}` : full
       },
     }),
   )

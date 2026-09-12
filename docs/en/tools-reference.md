@@ -78,7 +78,7 @@ age: 245897
 - Timeout → `"Request failed: timeout after Nms (aborted). The host may be filtered, down, or the port/scheme wrong — fix the target rather than retrying blindly."`
 - Connection failure → ships DNS/port/protocol troubleshooting hints; **treating "unreachable" as a finding is a methodology error** (mirrors the Strix discipline on Caido error pages)
 
-**Config interactions**: `httpTimeoutMs`, `httpMaxBodyChars`, `httpPostCapPerPath` (default 5). **State-changing policy** (0.11.0, shared with proxy replay since 0.12.0 via `evaluatePostPolicy`; verbs POST/PUT/PATCH/DELETE): pre-approved exact path+body (`body:"*"` wildcards any body; substrings never match) → send + clearance line; live attestation but non-preapproved → send + audit stamp with per-path count in the append-only `workspace/http-post-counts.jsonl` (legacy `.json` merged read-only; counts shared across all four verbs); no attestation → legacy behavior. Over-cap sends are REJECTED with a needs_follow_up pointer — rewording bodies (or switching verbs on the same path) does not help. GET/HEAD are reads and stay uncounted by design; browser-fired writes are enforced automatically (see browser section); shell/pybox network behavior is covered by the per-call approval gate.
+**Config interactions**: `httpTimeoutMs`, `httpMaxBodyChars`, `httpMaxBodyBytes` (default 2MB, 0 = unlimited — byte cap on body RECEPTION; the stream is cancelled at the limit so a multi-GB body never buffers into memory), `httpPostCapPerPath` (default 5). **State-changing policy** (0.11.0, shared with proxy replay since 0.12.0 via `evaluatePostPolicy`; verbs POST/PUT/PATCH/DELETE): pre-approved exact path+body (`body:"*"` wildcards any body; substrings never match) → send + clearance line; live attestation but non-preapproved → send + audit stamp with per-path count in the append-only `workspace/http-post-counts.jsonl` (claim-then-check since 0.12.4: the claim line is appended before the decision, and an over-cap claim is voided with a `{void:true}` line — the cap stays hard under concurrent senders) (legacy `.json` merged read-only; counts shared across all four verbs); no attestation → legacy behavior. Over-cap sends are REJECTED with a needs_follow_up pointer — rewording bodies (or switching verbs on the same path) does not help. GET/HEAD are reads and stay uncounted by design; browser-fired writes are enforced automatically (see browser section); shell/pybox network behavior is covered by the per-call approval gate.
 
 ---
 
@@ -481,7 +481,7 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | Config | Default | Affects |
 |---|---|---|
 | `workspaceDir` | `''` → `~/.dsh/strix-workspace` | All artifact roots |
-| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http (cap: per-path non-preapproved state-changing limit, append-only ledger `workspace/http-post-counts.jsonl`, legacy `.json` merged read-only; proxy POST replay shares the policy) |
+| `httpTimeoutMs` / `httpMaxBodyChars` / `httpMaxBodyBytes` / `httpPostCapPerPath` | 30000 / 20000 / 2000000 / 5 | strix_http (cap: per-path non-preapproved state-changing limit, append-only ledger `workspace/http-post-counts.jsonl`, legacy `.json` merged read-only; proxy POST replay shares the policy) |
 | `shellImage` / `shellNetwork` / `shellTimeoutMs` | python:3.12-slim / true / 120s | strix_shell |
 | `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox (base packages merged with per-call `install_packages`) |
 | `binariesDir` | `''` | recon/sast binary discovery (`~/.dsh/bin` is always searched) |
@@ -493,9 +493,9 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | `browserEnforcePostPolicy` | true | strix_browser automated spray-guard over browser-fired writes |
 | `strictEvidence` | true | strix_finding rejects evidence-less filings |
 | `approvalGate` | `'always'` | strix_shell / strix_pybox ask ApprovalService per call; `'off'` disables (unattended runs the operator accepts responsibility for only) |
-| `budgetLimitUsd` | `0` (uncapped) | strix_budget spend cap (USD); recon/sast/depcheck/proxy consult the ledger, over-budget behavior follows budgetAction |
+| `budgetLimitUsd` | `0` (uncapped) | strix_budget spend cap (USD); recon/sast/depcheck/proxy-start AND the execution tools shell/pybox/browser consult the ledger, over-budget behavior follows budgetAction |
 | `budgetInputPer1k` / `budgetOutputPer1k` | `0.00027` / `0.0004` | Ledger pricing (code defaults are DeepSeek V3.2 official; this machine's profiles override to 0.0001/0.0002; change the profile overlay when switching models) |
-| `budgetAction` | `'warn'` | Over-budget heavy-tool behavior: `'warn'` prepends a warning and proceeds, `'block'` refuses |
+| `budgetAction` | `'warn'` | Over-budget heavy-tool behavior: `'warn'` prepends a warning and proceeds, `'block'` refuses (since 0.12.4 this covers shell/pybox/browser too; browser close is never blocked so cleanup stays available over budget) |
 
 ---
 

@@ -36,8 +36,8 @@ beats shell-quoting gymnastics.
 ## HTTP from Python
 
 There is no `strix_http` Python module — that was upstream's Caido binding.
-Use the standard library or requests (via `install_packages: ["requests"]` in
-strix_pybox):
+Use the standard library or requests (via `install_packages: "requests"` — a
+SPACE-SEPARATED STRING, not an array — in strix_pybox):
 
 ```python
 import requests
@@ -70,9 +70,10 @@ re-send it manually via requests using the .req file contents.
 
 ## Installing extra packages
 
-strix_pybox: pass pip specs in `install_packages` (names only — flags like
-`-r`/`--index-url` are rejected). Common picks: `requests`, `httpx`,
-`beautifulsoup4`, `lxml`, `pyjwt`, `cryptography`.
+strix_pybox: pass pip specs in `install_packages` as a single string
+(space-separated for multiple, e.g. `"requests beautifulsoup4"`; names only —
+flags like `-r`/`--index-url` are rejected). Common picks: `requests`,
+`httpx`, `beautifulsoup4`, `lxml`, `pyjwt`, `cryptography`.
 
 strix_shell: the default python:3.12-slim image has no extra packages — pip
 install inside the same command if needed, or use strix_pybox instead.

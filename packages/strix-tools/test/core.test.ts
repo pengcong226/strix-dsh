@@ -20,7 +20,7 @@ import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_ME
 import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, listFindings, missingFinishSections, registerFinding, registerReport, validateFinding } from '../src/tools/finding.js'
 import { OUTCOMES, readLedger, registerCoverage, writeLedger } from '../src/tools/coverage.js'
 import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, registerAuthorization, renderAuthorizationSection, targetCoveredByAuth } from '../src/tools/authorization.js'
-import { bumpPostCount, postCountsPath, readPostCounts } from '../src/tools/http.js'
+import { claimPostCount, postCountsPath, readPostCounts } from '../src/tools/http.js'
 import { budgetPath, checkBudget, formatUsd, priceUsage, readBudget, registerBudget } from '../src/tools/budget.js'
 import { strixDhVersion } from '../src/tools/sarif.js'
 import { validPipPackages, registerPybox } from '../src/tools/pybox.js'
@@ -48,6 +48,7 @@ function scratchConfig(): ConfigType {
     workspaceDir: mkdtempSync(join(tmpdir(), 'strix-test-')),
     httpTimeoutMs: 1000,
     httpMaxBodyChars: 200,
+    httpMaxBodyBytes: 2_000_000,
     httpPostCapPerPath: 5,
     shellImage: 'python:3.12-slim',
     shellAllowedImages: [],
@@ -766,9 +767,9 @@ describe('http POST per-path counter', () => {
   it('starts empty and increments per path', () => {
     const config = scratchConfig()
     expect(readPostCounts(config)).toEqual({})
-    expect(bumpPostCount(config, '/oas/forgetPassword')).toBe(1)
-    expect(bumpPostCount(config, '/oas/forgetPassword')).toBe(2)
-    expect(bumpPostCount(config, '/other')).toBe(1)
+    expect(claimPostCount(config, '/oas/forgetPassword', 5).count).toBe(1)
+    expect(claimPostCount(config, '/oas/forgetPassword', 5).count).toBe(2)
+    expect(claimPostCount(config, '/other', 5).count).toBe(1)
     expect(readPostCounts(config)).toEqual({ '/oas/forgetPassword': 2, '/other': 1 })
     // Persisted as an append-only JSONL ledger: one {ts, path} line per send.
     const lines = readFileSync(postCountsPath(config), 'utf8').split('\n').filter((l) => l.trim())
@@ -794,15 +795,47 @@ describe('http POST per-path counter', () => {
     writeFileSync(join(config.workspaceDir, 'http-post-counts.json'), JSON.stringify({ '/oas/forgetPassword': 5 }))
     // At the cap already: an upgrade must not hand the model a fresh budget.
     expect(readPostCounts(config)).toEqual({ '/oas/forgetPassword': 5 })
-    expect(bumpPostCount(config, '/oas/forgetPassword')).toBe(6)
+    expect(claimPostCount(config, '/oas/forgetPassword', 0).count).toBe(6)
   })
 
   it('does not lose counts when two writers append concurrently', () => {
     const config = scratchConfig()
     // The old read→mutate→rewrite implementation had each writer read the
     // same total and both write old+1. Appending is order-independent.
-    for (let i = 0; i < 7; i++) bumpPostCount(config, '/api/reset')
+    for (let i = 0; i < 7; i++) claimPostCount(config, '/api/reset', 0)
     expect(readPostCounts(config)['/api/reset']).toBe(7)
+  })
+
+  it('enforces a HARD cap: at most cap valid claims exist per path (claim-then-check regression)', () => {
+    const config = scratchConfig()
+    // cap=3: the first three claims are granted, the fourth is refused.
+    // The previous check-then-bump order let concurrent racers both read
+    // `seen < cap` and both proceed — the cap was soft. Claim-then-check
+    // voids any claim that lands beyond the cap.
+    expect(claimPostCount(config, '/login', 3)).toEqual({ granted: true, count: 1 })
+    expect(claimPostCount(config, '/login', 3)).toEqual({ granted: true, count: 2 })
+    expect(claimPostCount(config, '/login', 3)).toEqual({ granted: true, count: 3 })
+    const over = claimPostCount(config, '/login', 3)
+    expect(over.granted).toBe(false)
+    // A refused claim is VOIDED in the ledger: the valid total stays at cap,
+    // not cap + refused-attempts.
+    expect(readPostCounts(config)['/login']).toBe(3)
+    // cap=0 means unlimited — claims always granted, never voided.
+    expect(claimPostCount(config, '/login', 0).granted).toBe(true)
+    expect(readPostCounts(config)['/login']).toBe(4)
+  })
+
+  it('void lines cancel exactly one claim and are skipped by the tally', () => {
+    const config = scratchConfig()
+    claimPostCount(config, '/x', 5)
+    claimPostCount(config, '/x', 5)
+    // A void line (as written by a refused over-cap claim) subtracts one.
+    appendFileSync(postCountsPath(config), JSON.stringify({ ts: 't', path: '/x', void: true }) + '\n', 'utf8')
+    // readPostCounts also folds the LEGACY json file — absent here, so the
+    // tally comes from the JSONL ledger alone: 2 claims − 1 void = 1.
+    expect(readPostCounts(config)['/x']).toBe(1)
+    // And the next claim sees the voided total (2 − 1 + 1 = 2).
+    expect(claimPostCount(config, '/x', 5).count).toBe(2)
   })
 
   it('exposes the configured per-path cap default', () => {
@@ -1886,6 +1919,50 @@ describe.skipIf(!chromiumReady)('browser persistent session (real Chromium)', ()
     await tool.execute({ action: 'close', session: 'iso-a' })
     await tool.execute({ action: 'close', session: 'iso-b' })
   })
+
+  it('evaluate: bare expressions run directly, statements fall back to an IIFE (heuristic regression)', async () => {
+    const config = scratchConfig()
+    const tool = browserTool(config)
+    await tool.execute({ action: 'navigate', session: 'eval-1', url: baseUrl })
+
+    // Bare identifier/expression: runs as-is, no fallback marker. (The old
+    // `includes('=>')` heuristic wrapped plain expressions in an IIFE and
+    // returned undefined for them.)
+    await expect(tool.execute({ action: 'evaluate', session: 'eval-1', value: 'document.title' })).resolves.toBe('strix-dh test page')
+    // A multi-statement snippet whose LAST part is an expression evaluates
+    // fine directly (Chromium accepts `let n = 1; n += 1; n` as one program
+    // and returns 2) — no fallback needed, no marker.
+    await expect(tool.execute({ action: 'evaluate', session: 'eval-1', value: 'let n = 1; n += 1; n' })).resolves.toBe('2')
+    // A `return` statement is ILLEGAL in the expression context → the page
+    // throws a SyntaxError → the statement fallback wraps it in
+    // `(() => { ... })()` and stamps the retry note.
+    const out = await tool.execute({ action: 'evaluate', session: 'eval-1', value: 'return 6 * 7' })
+    expect(out).toMatch(/42/)
+    expect(out).toMatch(/ran as statements/)
+    // An arrow FUNCTION value passes through unwrapped (the heuristic used
+    // to send statement strings unwrapped and arrow values double-wrapped).
+    await expect(tool.execute({ action: 'evaluate', session: 'eval-1', value: 'typeof (() => 1)' })).resolves.toBe('function')
+    await tool.execute({ action: 'close', session: 'eval-1' })
+  })
+
+  it('concurrent first calls on one session name share a single browser (leak regression)', async () => {
+    const config = scratchConfig()
+    const tool = browserTool(config)
+    // Two actions racing on the SAME fresh session name: both must resolve
+    // (a navigate racing another action on the one shared page can abort
+    // with ERR_ABORTED — Playwright cancels in-flight loads — so the race
+    // pair is evaluate+evaluate, both landing on the one page). The old
+    // code launched two browsers and one leaked, unreachable by close.
+    const [a, b] = await Promise.all([
+      tool.execute({ action: 'evaluate', session: 'race-1', value: '1 + 1' }),
+      tool.execute({ action: 'evaluate', session: 'race-1', value: '2 + 2' }),
+    ])
+    expect(a).toMatch(/2/)
+    expect(b).toMatch(/4/)
+    // The session is closeable exactly once — the second close reports not-open.
+    await expect(tool.execute({ action: 'close', session: 'race-1' })).resolves.toMatch(/closed/)
+    await expect(tool.execute({ action: 'close', session: 'race-1' })).resolves.toMatch(/not open/)
+  })
 })
 
 // ── http timeout covers the body-receiving phase ─────────────────────────────
@@ -2014,10 +2091,17 @@ describe('approval gate (createApprovalGate)', () => {
 
 const dockerReady = (() => {
   try {
-    const r = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
+    // A responding daemon is NOT enough: GitHub's windows runners run a
+    // Windows-native daemon with no linux/amd64 manifests, and
+    // `python:3.12-slim` fails with exit 125 ("no matching manifest") —
+    // the integration tests must self-skip there (regression: the probe
+    // only checked Server.Version and both container tests failed on
+    // windows-latest). Docker Desktop (Linux containers) reports
+    // OSType=linux and runs normally.
+    const r = spawnSync('docker', ['info', '--format', '{{.OSType}}'], {
       encoding: 'utf8', timeout: 15_000, windowsHide: true,
     })
-    return r.status === 0 && !!r.stdout.trim()
+    return r.status === 0 && r.stdout.trim().toLowerCase() === 'linux'
   } catch {
     return false
   }
@@ -2050,4 +2134,122 @@ describe.skipIf(!dockerReady)('docker integration: strix_shell / strix_pybox end
     expect(out).toMatch(/arg=args-ok/)
     expect(out).not.toMatch(/Docker is unavailable/)
   }, 120_000)
+})
+
+// ── http response byte cap ────────────────────────────────────────────────────
+// Regression: response.text() buffered the ENTIRE body into memory before the
+// display copy was truncated — a multi-GB body OOM'd the harness. Reception
+// must stop at httpMaxBodyBytes.
+
+describe('sendHttpRequest byte cap', () => {
+  it('stops receiving at httpMaxBodyBytes and stamps the output', async () => {
+    const http = await import('node:http')
+    // 50KB body; cap at 10KB — the connection must be torn down mid-stream.
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('y'.repeat(50_000))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const addr = server.address()
+    const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}/`
+    try {
+      const config = { ...scratchConfig(), httpMaxBodyBytes: 10_000, httpMaxBodyChars: 200_000 }
+      const out = await sendHttpRequest(config, { url })
+      expect(out.ok).toBe(true)
+      expect(out.text).toMatch(/body reception stopped at 10000 bytes/)
+      // The received body is bounded by the cap. Node's fetch may coalesce
+      // the whole 50KB into one chunk for a loopback response, so assert on
+      // the CAP being hit and the marker, not on an exact byte count.
+      expect(out.text).toMatch(/\[body reception stopped/)
+      // The DISPLAY copy stays char-truncated as before.
+      expect(out.rawBody.length).toBeLessThanOrEqual(50_000)
+    } finally {
+      server.close()
+      server.closeAllConnections?.()
+    }
+  })
+
+  it('receives the full body when under the cap', async () => {
+    const http = await import('node:http')
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('complete-body')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const addr = server.address()
+    const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}/`
+    try {
+      const out = await sendHttpRequest(scratchConfig(), { url })
+      expect(out.ok).toBe(true)
+      expect(out.rawBody).toBe('complete-body')
+      expect(out.text).not.toMatch(/body reception stopped/)
+    } finally {
+      server.close()
+      server.closeAllConnections?.()
+    }
+  })
+})
+
+// ── budget block gates the execution-class tools ─────────────────────────────
+// Regression: budgetAction 'block' was consulted only by recon/sast/depcheck/
+// proxy — shell/pybox/browser ran regardless, so the config promised more
+// than it enforced.
+
+describe('budget block gates execution tools', () => {
+  function overBudgetConfig(): ConfigType {
+    const config = scratchConfig()
+    // One record already over a $1 cap: priced at the scratch per-1K rates.
+    writeFileSync(join(config.workspaceDir, 'budget-records.jsonl'),
+      JSON.stringify({ ts: 't', in: 100_000, out: 0, usd: 10, note: 'seed' }) + '\n', 'utf8')
+    return { ...config, budgetLimitUsd: 1, budgetAction: 'block' as const }
+  }
+
+  it('strix_shell refuses under block mode without running anything', async () => {
+    const regs: unknown[] = []
+    registerShell({ tools: { register: (d: unknown) => regs.push(d) } } as never, overBudgetConfig())
+    const tool = regs[0] as { execute: (raw: Record<string, unknown>, exec: unknown) => Promise<string> }
+    const out = await tool.execute({ command: 'echo should-not-run' }, { name: 'strix_shell', callId: 'b-1' })
+    expect(out).toMatch(/BUDGET EXCEEDED: strix_shell refused/)
+    expect(out).not.toMatch(/should-not-run/)
+    // Nothing reached the evidence result ledger (the refusal precedes the gate).
+    expect(existsSync(join(overBudgetConfig().workspaceDir, 'evidence', 'log.jsonl'))).toBe(false)
+  })
+
+  it('strix_pybox refuses under block mode without running anything', async () => {
+    const regs: unknown[] = []
+    registerPybox({ tools: { register: (d: unknown) => regs.push(d) } } as never, overBudgetConfig())
+    const tool = regs[0] as { execute: (raw: Record<string, unknown>, exec: unknown) => Promise<string> }
+    const out = await tool.execute({ script: 'print("should-not-run")' }, { name: 'strix_pybox', callId: 'b-2' })
+    expect(out).toMatch(/BUDGET EXCEEDED: strix_pybox refused/)
+    expect(out).not.toMatch(/should-not-run/)
+  })
+
+  it('strix_browser refuses actions but keeps close available over budget', async () => {
+    let disposed = false
+    const captured: Record<string, { execute: (raw: Record<string, unknown>) => Promise<string> }> = {}
+    registerBrowser({
+      tools: { register: (t) => { captured[t.name] = t } },
+      effect: (fn: () => () => void) => { return () => { disposed = true; fn()() } },
+    } as never, overBudgetConfig())
+    const tool = captured.strix_browser!
+    const out = await tool.execute({ action: 'navigate', session: 'b', url: 'http://127.0.0.1:1/' })
+    expect(out).toMatch(/BUDGET EXCEEDED: strix_browser refused/)
+    // close on an unopened session still answers (cleanup stays available).
+    expect(await tool.execute({ action: 'close', session: 'b' })).toMatch(/not open/)
+    expect(disposed).toBe(false)
+  })
+})
+
+// ── bundled skill contract lint ───────────────────────────────────────────────
+// Regression: python.md taught `install_packages: ["requests"]` (an ARRAY)
+// while the tool parameter is a space-separated STRING — a model following
+// the skill verbatim passes the wrong type. Skills are prompt surface; their
+// examples must match the tool contracts they teach.
+
+describe('bundled skill contract lint', () => {
+  it('python.md teaches install_packages as a string, not an array', () => {
+    const md = readFileSync(new URL('../assets/skills/python.md', import.meta.url), 'utf8')
+    expect(md).not.toMatch(/install_packages:\s*\[/)
+    expect(md).toMatch(/install_packages:\s*"/)
+  })
 })

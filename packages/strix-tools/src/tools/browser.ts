@@ -16,6 +16,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
+import { checkBudget } from './budget.js'
 import { evaluatePostPolicy, STATE_CHANGING_METHODS } from './http.js'
 import { safeId, truncate, workspaceSub } from '../lib/util.js'
 
@@ -112,17 +113,40 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>()
+/**
+ * In-flight session creations. Two concurrent calls for the SAME session name
+ * both missed the `sessions.get` hit and each launched a browser — one entry
+ * overwrote the other in the map and the loser browser leaked (never closed,
+ * invisible to close/unload). The promise cache makes creation single-flight:
+ * concurrent callers await the SAME launch. A failed launch is removed so a
+ * retry can try again.
+ */
+const sessionPromises = new Map<string, Promise<Session>>()
 let playwrightUnavailable = false
 
 /**
  * Get or create a session: one BrowserContext + one long-lived Page per
  * session name. The context keeps cookies/localStorage across calls; the page
- * keeps navigation state. The spray-guard route is installed on the page once,
- * at creation — later calls reuse the guarded page.
+ * keeps navigation state. The spray-guard route is installed on the context
+ * once, at creation — later calls reuse the guarded context.
  */
 async function getSession(config: ConfigType, session: string): Promise<Session> {
   const existing = sessions.get(session)
   if (existing) return existing
+  const inflight = sessionPromises.get(session)
+  if (inflight) return inflight
+  const created = createSession(config, session)
+  sessionPromises.set(session, created)
+  try {
+    const entry = await created
+    sessions.set(session, entry)
+    return entry
+  } finally {
+    sessionPromises.delete(session)
+  }
+}
+
+async function createSession(config: ConfigType, _session: string): Promise<Session> {
   let pw: typeof import('playwright')
   try {
     pw = await import('playwright')
@@ -139,9 +163,7 @@ async function getSession(config: ConfigType, session: string): Promise<Session>
   // sound default for a validation browser.
   const context = await browser.newContext({ serviceWorkers: 'block' })
   const page = await context.newPage()
-  const entry: Session = { browser, context, page, guardInstalled: false, guardNotes: [] }
-  sessions.set(session, entry)
-  return entry
+  return { browser, context, page, guardInstalled: false, guardNotes: [] }
 }
 
 export function registerBrowser(ctx: Context, config: ConfigType) {
@@ -194,6 +216,12 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
           await entry.browser.close().catch(() => {})
           return `Session "${sessionName}" closed.`
         }
+
+        // Budget gate AFTER close: cleanup must stay available over budget,
+        // but browser automation is an execution-class operation — 'block'
+        // must refuse it like shell/pybox, not just recon/sast.
+        const budgetGate = checkBudget(config, 'strix_browser')
+        if (budgetGate.over && config.budgetAction === 'block') return budgetGate.message
 
         let entry: Session
         try {
@@ -250,40 +278,53 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
               // Wrap as an expression: a bare identifier like `document.title`
               // evaluates to undefined in Playwright's expression context.
               const title = await page.evaluate<unknown>('(() => document.title)()')
-              return withNotes(`Navigated ${args.url} — title: ${title}`)
+              return withNotes(budgetGate.over ? `${budgetGate.message}\nNavigated ${args.url} — title: ${title}` : `Navigated ${args.url} — title: ${title}`)
             }
             case 'click': {
               if (!args.selector) return 'REJECTED: selector is required for click.'
               await page.click(args.selector, { timeout: 10_000 })
-              return withNotes(`Clicked ${args.selector}.`)
+              return withNotes(budgetGate.over ? `${budgetGate.message}\nClicked ${args.selector}.` : `Clicked ${args.selector}.`)
             }
             case 'fill': {
               if (!args.selector || args.value === undefined) return 'REJECTED: selector and value are required for fill.'
               await page.fill(args.selector, args.value, { timeout: 10_000 })
-              return withNotes(`Filled ${args.selector}.`)
+              return withNotes(budgetGate.over ? `${budgetGate.message}\nFilled ${args.selector}.` : `Filled ${args.selector}.`)
             }
             case 'evaluate': {
               if (!args.value) return 'REJECTED: value (JS expression) is required for evaluate.'
-              // Wrap as an IIFE expression so both statements and plain
-              // expressions work, and undefined/null render as text instead
-              // of crashing truncate (JSON.stringify(undefined) is undefined).
-              const expr = args.value.includes('=>') && !args.value.trim().startsWith('(')
-                ? args.value
-                : `(() => (${args.value}))()`
-              const result = await page.evaluate<unknown>(expr)
+              // Try the input as an EXPRESSION first (the common case: a
+              // bare identifier like `document.title` is a valid expression
+              // and needs no wrapping); if the page rejects it as a syntax
+              // error, retry once wrapped as an IIFE so multi-statement
+              // snippets (`let x = 1; x + 2`) also work. The previous
+              // `includes('=>')` heuristic mis-wrapped arrow functions and
+              // let statement strings through unwrapped, both failing.
+              let result: unknown
+              let usedStatementFallback = false
+              try {
+                result = await page.evaluate<unknown>(args.value)
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err)
+                if (!/SyntaxError|Unexpected (token|end|identifier)|Unexpected token/i.test(msg)) throw err
+                result = await page.evaluate<unknown>(`(() => { ${args.value} })()`)
+                usedStatementFallback = true
+              }
               const rendered =
                 typeof result === 'string' ? result : JSON.stringify(result, null, 2) ?? String(result)
-              return withNotes(truncate(rendered, 10_000))
+              const suffix = usedStatementFallback ? '\n[ran as statements — pass a single expression to avoid the retry]' : ''
+              return withNotes(truncate(rendered, 10_000) + suffix)
             }
             case 'screenshot': {
               const dir = workspaceSub(config, 'screenshots')
               const path = join(dir, `${sessionName}-${Date.now()}.png`)
               await page.screenshot({ path, fullPage: args.full_page ?? false })
-              return `Screenshot saved: ${path} (view it with the read_image tool).`
+              const text = `Screenshot saved: ${path} (view it with the read_image tool).`
+              return budgetGate.over ? `${budgetGate.message}\n${text}` : text
             }
             case 'content': {
               const html = await page.content()
-              return truncate(html, 20_000)
+              const text = truncate(html, 20_000)
+              return budgetGate.over ? `${budgetGate.message}\n${text}` : text
             }
             default:
               return `Unknown action "${args.action}". Use navigate | click | fill | evaluate | screenshot | content | close.`

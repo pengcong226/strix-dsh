@@ -78,9 +78,9 @@ age: 245897
 - 超时 → `"Request failed: timeout after Nms (aborted). The host may be filtered, down, or the port/scheme wrong — fix the target rather than retrying blindly."`
 - 连接失败 → 附带 DNS/端口/协议排查提示；**把"连不上"当发现是方法错误**（对应 Strix 对 Caido 错误页的纪律）
 
-**配置交互**：`httpTimeoutMs`、`httpMaxBodyChars`、`httpPostCapPerPath`（默认 5）。
+**配置交互**：`httpTimeoutMs`、`httpMaxBodyChars`、`httpMaxBodyBytes`（默认 2MB，0 不限——响应接收的字节上限，达限即断流并在输出标注，防止多 GB body 全量进内存）、`httpPostCapPerPath`（默认 5）。
 
-**POST 政策**（0.11.0；0.12.0 起与 proxy replay 共用同一实现 `evaluatePostPolicy`，动词覆盖 POST/PUT/PATCH/DELETE）：三分支——① 命中 `pre_approved_post_paths`（精确 path + 精确 body，`body:"*"` 通配任意体；子串不算命中；四个动词共用）→ 直发 + clearance 审计行；② 未命中但存在有效（未过期）授权 → 直发 + `[non-preapproved <VERB> <path> — live authorization, count n/N]` 审计戳，按 path 计入 append-only 台账 `workspace/http-post-counts.jsonl`（旧版 `.json` 只读兼容，计数四动词共享）；③ 无授权 → 与旧版一致直发。超 `httpPostCapPerPath` 时 REJECTED，指引记 `needs_follow_up` 并申请预批，不许换词重试（换动词也不行——同一 path 预算）。**剩余旁路声明**：GET/HEAD 系读操作不计数（by design）；shell/pybox 的网络行为由**逐调用人工审批门**覆盖（任意代码执行的安全边界，比计数更强的控制，不在此台账里；无人值守 `approvalGate:'off'` 下靠镜像 allowlist + 操作者自担）。
+**POST 政策**（0.11.0；0.12.0 起与 proxy replay 共用同一实现 `evaluatePostPolicy`，动词覆盖 POST/PUT/PATCH/DELETE）：三分支——① 命中 `pre_approved_post_paths`（精确 path + 精确 body，`body:"*"` 通配任意体；子串不算命中；四个动词共用）→ 直发 + clearance 审计行；② 未命中但存在有效（未过期）授权 → 直发 + `[non-preapproved <VERB> <path> — live authorization, count n/N]` 审计戳，按 path 计入 append-only 台账 `workspace/http-post-counts.jsonl`（旧版 `.json` 只读兼容，计数四动词共享）；③ 无授权 → 与旧版一致直发。计数为 claim-then-check（先占位后判定，越限占位以 `{void:true}` 行对冲——并发写手下限仍硬于 cap）超 `httpPostCapPerPath` 时 REJECTED，指引记 `needs_follow_up` 并申请预批，不许换词重试（换动词也不行——同一 path 预算）。**剩余旁路声明**：GET/HEAD 系读操作不计数（by design）；shell/pybox 的网络行为由**逐调用人工审批门**覆盖（任意代码执行的安全边界，比计数更强的控制，不在此台账里；无人值守 `approvalGate:'off'` 下靠镜像 allowlist + 操作者自担）。
 
 ---
 
@@ -483,7 +483,7 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | 配置 | 默认 | 影响 |
 |---|---|---|
 | `workspaceDir` | `''` → `~/.dsh/strix-workspace` | 全部产物根目录 |
-| `httpTimeoutMs` / `httpMaxBodyChars` / `httpPostCapPerPath` | 30000 / 20000 / 5 | strix_http（cap：同 path 非预批 POST 上限，存 append-only 台账 `workspace/http-post-counts.jsonl`，旧 `.json` 只读兼容；proxy POST replay 共用同一政策） |
+| `httpTimeoutMs` / `httpMaxBodyChars` / `httpMaxBodyBytes` / `httpPostCapPerPath` | 30000 / 20000 / 2000000 / 5 | strix_http（cap：同 path 非预批 POST 上限，存 append-only 台账 `workspace/http-post-counts.jsonl`，旧 `.json` 只读兼容；proxy POST replay 共用同一政策） |
 | `shellImage` / `shellNetwork` / `shellTimeoutMs` | python:3.12-slim / true / 120s | strix_shell |
 | `pyboxImage` / `pyboxExtraPackages` / `pyboxNetwork` / `pyboxTimeoutMs` | python:3.12-slim / [] / true / 60s | strix_pybox（预装包与单次 `install_packages` 合并安装） |
 | `binariesDir` | `''` | recon/sast 二进制发现（`~/.dsh/bin` 始终在搜索路径） |
@@ -495,9 +495,9 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | `browserEnforcePostPolicy` | true | strix_browser 写操作自动 spray-guard（与 strix_http 同政策） |
 | `strictEvidence` | true | strix_finding 无证据拒收 |
 | `approvalGate` | `'always'` | strix_shell / strix_pybox 每次调用经 ApprovalService 审批；`'off'` 关闭（仅限操作者自担责任的无人值守运行） |
-| `budgetLimitUsd` | `0`（不限） | strix_budget 花费上限（USD）；recon/sast/depcheck/proxy 执行前查账，超限按 budgetAction 处理 |
+| `budgetLimitUsd` | `0`（不限） | strix_budget 花费上限（USD）；recon/sast/depcheck/proxy-start 与执行类 shell/pybox/browser 执行前查账，超限按 budgetAction 处理 |
 | `budgetInputPer1k` / `budgetOutputPer1k` | `0.00027` / `0.0004` | 记账单价（代码默认 DeepSeek V3.2 官价；本机 profile 已覆盖为 0.0001/0.0002；换模型时改 profile 覆盖层） |
-| `budgetAction` | `'warn'` | 超限后重型工具行为：`'warn'` 前置警告继续，`'block'` 拒绝执行 |
+| `budgetAction` | `'warn'` | 超限后重型工具行为：`'warn'` 前置警告继续，`'block'` 拒绝执行（0.12.4 起覆盖 shell/pybox/browser；browser 的 close 不受拦截，超预算仍可清理会话） |
 
 ---
 
