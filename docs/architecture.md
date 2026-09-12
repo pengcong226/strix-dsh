@@ -4,8 +4,8 @@
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| dsh CLI（运行时） | **0.1.2-alpha.5** | 开发基线（2026-09-03 自 alpha.3 升级，插件零改动通过全量冒烟），经 `npx @deepseek-ai/dsh@0.1.2-alpha.5` 调用 |
-| @deepseek-ai/dsh-tools | **0.1.2-alpha.5** | 与运行时实际携带的副本对齐（CLI 依赖用 `^0.1.2-alpha.3`+ 范围拉取，解析到 alpha.5） |
+| dsh CLI（运行时） | **0.1.5-rc.2** | 开发基线（2026-09-12 自 0.1.2-alpha.5 升级；0.12.2 补齐拆分服务包直接依赖，139 测试绿 + 新 dsh 真机加载验证），经 `npx @deepseek-ai/dsh@0.1.5-rc.2` 调用 |
+| @deepseek-ai/dsh-* 全系（tools/agent/jobs/skill/system-prompt 等 13 包） | **0.1.5-rc.2** | 与运行时实际携带的副本对齐（0.12.2 起拆分服务包全部钉精确版本直接依赖） |
 | @deepseek-ai/cordis | ^4.0.2 | |
 | @deepseek-ai/schemastery | ^3.18.2 | |
 
@@ -32,7 +32,7 @@
 - bundle = package.json 声明 `"dsh": {"bundle": {"patch": "./cordis.patch.yml"}}` + patch 层（行按**包名**引用插件）+ 编译后的 `dist/`
 - 安装：`dsh plugin --profile <name> add ./packages/strix-tools`（pnpm link 进 profile）
 - 组装顺序：dsh-base → 依加入顺序的各 bundle → profile 自身 cordis.patch.yml → `--patch` 覆盖层
-- 验证：`dsh --profile <name> --dump-config` 看 `# == strix-dsh-tools` 层；启动日志看 `[strix-dsh-tools] registered 11 tool modules`
+- 验证：`dsh --profile <name> --dump-config` 看 `# == strix-dsh-tools` 层；启动日志看 `[strix-dsh-tools] registered 16 tool modules`
 - `web` 子命令 = `--profile web` 的别名；**profile 标志在顶层**，`web` 不接受 `--profile`
 
 ## 关键机制 4：skills 发现路径（skill-filesystem provider）
@@ -70,8 +70,8 @@ Strix 的 coverage/notes/threat_model 是共享可变台账。StriX-DH v1 用 **
 ```sh
 cd packages/strix-tools && npm install && npm run build
 dsh plugin --profile web add ./packages/strix-tools   # 装进 web profile
-npx -y @deepseek-ai/dsh@0.1.2-alpha.5 web --no-open > dsh-boot.log 2>&1
-# 启动日志第一行应为: [strix-dsh-tools] registered 11 tool modules
+npx -y @deepseek-ai/dsh@0.1.5-rc.2 web --no-open > dsh-boot.log 2>&1
+# 启动日志第一行应为: [strix-dsh-tools] registered 16 tool modules
 # WebUI: http://127.0.0.1:3080/?token=<启动日志中的token>
 ```
 

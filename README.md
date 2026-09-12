@@ -13,7 +13,7 @@ StriX-DH takes the offensive-security methodology of [Strix](https://github.com/
 | `strix_runs` | run overview | Engagement orientation: what already exists in the workspace |
 | `strix_http` | Caido replay workflow | Raw HTTP client: any method/headers/body or full raw-request replay; bounded output, save-to-disk |
 | `strix_finding` | `create_vulnerability_report` | **Evidence-bound** finding registry: strict mode rejects evidence-less filings; CVSS metrics must map to demonstrated PoC results; white-box inline fixes (`code_locations` + `fix_pr_body`); dependency CVEs; update-with-dedup semantics |
-| `strix_report` | report generation | Markdown engagement report from findings + coverage ledger |
+| `strix_report` | report generation | Markdown engagement report from findings + coverage ledger; `action=sarif` emits a SARIF 2.1.0 sidecar for CI code-scanning; `action=finish` closes the engagement (root/orchestrator only) |
 | `strix_coverage` | `record_coverage` | Attack-surface ledger — including surfaces that came back clean; `needs_follow_up` marks open proof gaps |
 | `strix_notes` | shared notes | Cross-agent scratchpad (credentials, endpoint inventories, target quirks) |
 | `strix_threat_model` | threat model | Shared model: establish before testing, amend when disproven |
@@ -21,7 +21,7 @@ StriX-DH takes the offensive-security methodology of [Strix](https://github.com/
 | `strix_budget` | spend ledger | LLM cost ledger (record/status/reset) with per-1K pricing; recon/sast consult it and warn or refuse over budget |
 | `strix_shell` | Kali sandbox `exec_command` | One-shot command execution in a disposable Docker container (workspace mounted), configurable image — **operator approval per call**; `background=true` runs as a dsh background job (`job_output`/`job_kill`) |
 | `strix_pybox` | Python exploit runtime | Python scripts in a disposable sandbox: bulk payload sprays, PoC execution; hard timeout, optional network isolation — **operator approval per call** |
-| `strix_browser` | `agent-browser --session` | Playwright Chromium sessions isolated per name: navigate/click/fill/evaluate/screenshot |
+| `strix_browser` | `agent-browser --session` | Playwright Chromium sessions isolated per name — persistent (cookies/localStorage survive between calls); navigate/click/fill/evaluate/screenshot; every page carries the automated spray-guard (browser-fired writes pass the same pre-approval/cap policy as strix_http) |
 | `strix_recon` | recon phase | subfinder → httpx orchestration (status/title/tech), results on disk |
 | `strix_sast` | nuclei/semgrep | Rate-limited template scanning + static analysis; scanner output is a lead, never a finding |
 | `strix_proxy` | Caido proxy workflow | Mitmproxy sidecar (Docker): intercept, query flows, replay via strix_http path |
@@ -56,7 +56,7 @@ install chromium` for `strix_browser`.
 ## Documentation
 
 - **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — the developer handbook: full Strix/dsh analysis, compatibility surface, upgrade drill (start here)
-- [docs/tools-reference.md](docs/tools-reference.md) — full contract of all 15 tools with verified outputs
+- [docs/tools-reference.md](docs/tools-reference.md) — full contract of all 16 tools with verified outputs
 - [docs/walkthrough.md](docs/walkthrough.md) — from boot to your first report, step by step
 - [docs/strix-analysis.md](docs/strix-analysis.md) / [docs/en/strix-analysis.md](docs/en/strix-analysis.md) / [docs/dsh-analysis.md](docs/dsh-analysis.md) / [docs/en/dsh-analysis.md](docs/en/dsh-analysis.md) — deep upstream analyses (ZH/EN both)
 - [docs/skills-catalog.md](docs/skills-catalog.md) / [docs/en/skills-catalog.md](docs/en/skills-catalog.md) — the 75 adapted knowledge packages (ZH/EN)

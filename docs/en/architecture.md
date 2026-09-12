@@ -4,9 +4,8 @@
 
 | Component | Version | Notes |
 |---|---|---|
-| dsh CLI (runtime) | **0.1.2-alpha.5** | Dev baseline (upgraded from alpha.3 on 2026-09-03, plugin passed the full smoke suite with zero changes), invoked via `npx @deepseek-ai/dsh@0.1.2-alpha.5` |
-| @deepseek-ai/dsh-tools | **0.1.2-alpha.5** | Aligned with the copy the runtime actually carries (the CLI's `^0.1.2-alpha.3`+ range resolves to alpha.5) |
-| @deepseek-ai/dsh-jobs | **0.1.2-alpha.5** | Pinned exactly (background-mode producer); same alignment rule |
+| dsh CLI (runtime) | **0.1.5-rc.2** | Dev baseline (upgraded from 0.1.2-alpha.5 on 2026-09-12; 0.12.2 added the split service packages as direct deps; 139 tests green + loading verified on the new dsh), invoked via `npx @deepseek-ai/dsh@0.1.5-rc.2` |
+| @deepseek-ai/dsh-* family (tools/agent/jobs/skill/system-prompt etc., 13 packages) | **0.1.5-rc.2** | Aligned with the copies the runtime actually carries (since 0.12.2 all split service packages are exact-pinned direct deps) |
 | @deepseek-ai/cordis | ^4.0.2 | |
 | @deepseek-ai/schemastery | ^3.18.2 | |
 
@@ -69,8 +68,8 @@ Pick the preset in the session selector to enter the corresponding mode. If a pr
 ```sh
 cd packages/strix-tools && npm install && npm run build
 dsh plugin --profile web add ./packages/strix-tools   # install into the web profile
-npx -y @deepseek-ai/dsh@0.1.2-alpha.5 web --no-open > dsh-boot.log 2>&1
-# boot log line 1 should read: [strix-dsh-tools] registered 15 tool modules (15 tools) + methodology + authorization sections + 75 skills
+npx -y @deepseek-ai/dsh@0.1.5-rc.2 web --no-open > dsh-boot.log 2>&1
+# boot log line 1 should read: [strix-dsh-tools] registered 16 tool modules + methodology + authorization sections + 75 skills
 # WebUI: http://127.0.0.1:3080/?token=<token from the boot log>
 ```
 

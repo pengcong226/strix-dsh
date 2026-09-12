@@ -17,7 +17,7 @@ for the DeepSeek Harness, adapted from Strix (Apache-2.0).
   strict, NodeNext ESM — imports need `.js` extensions).
 - Regenerate adapted skills after upstream changes:
   `python scripts/adapt_skills.py`.
-- Run: `npx -y @deepseek-ai/dsh@0.1.2-alpha.5 web --no-open` (boot log prints
+- Run: `npx -y @deepseek-ai/dsh@0.1.5-rc.2 web --no-open` (boot log prints
   the registration line and the tokened WebUI URL).
 - Default engagement workspace: `~/.dsh/strix-workspace` (findings/, coverage/,
   notes/, recon/, pybox/, responses/, evidence/, report.md).

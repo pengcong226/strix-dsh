@@ -14,12 +14,12 @@ StriX-DH 把 [Strix](https://github.com/usestrix/strix)（Apache-2.0）的攻击
 | `strix_http` | Caido 代理重放流 | 原始 HTTP 客户端：任意方法/头/体/完整 raw 请求重放，响应截断可控、可存盘 |
 | `strix_shell` | Kali 沙箱 exec_command | 一次性 Docker 容器内执行命令（workspace 挂载 /workspace），镜像可配置；**每次调用需操作者批准**；`background=true` 进后台 job（`job_output`/`job_kill` 管理） |
 | `strix_pybox` | Python 漏洞利用沙箱 | Python 脚本沙箱：批量 payload 喷射、PoC 执行，硬超时 + 可断网；**每次调用需操作者批准** |
-| `strix_browser` | agent-browser --session | Playwright Chromium 会话（按名隔离），导航/点击/填充/执行JS/截图 |
+| `strix_browser` | agent-browser --session | Playwright Chromium 会话（按名隔离、持久化——cookie/localStorage 跨调用保留），导航/点击/填充/执行JS/截图；每页自动挂 spray-guard（浏览器发起的写请求走与 strix_http 相同的预批/上限策略） |
 | `strix_recon` | 侦察阶段 | subfinder → httpx 编排（状态/标题/技术栈），结果落盘 |
 | `strix_sast` | nuclei/semgrep 扫描 | 低频默认值；扫描结果只是线索，不是发现 |
 | `strix_proxy` | 代理拦截与重放 | mitmproxy 侧车（Docker）：拦截流量、查询、经 strix_http 路径重放 |
 | `strix_finding` | create_vulnerability_report | **证据绑定**：strict 模式下无 evidence 拒收；CVSS 指标必须对应已演示的 PoC 证据；支持白盒内联修复（code_locations + fix_pr_body）、dependency CVE、update 去重修订 |
-| `strix_report` | 报告生成 | 汇总 findings + coverage 生成 Markdown 报告 |
+| `strix_report` | 报告生成 | 汇总 findings + coverage 生成 Markdown 报告；`action=sarif` 输出 SARIF 2.1.0 旁车（CI 代码扫描）；`action=finish` 收尾 engagement（仅 root/编排者） |
 | `strix_coverage` | record/list_coverage | 攻击面台账：**包括测过没洞的**，needs_follow_up 标记 open_proof_gap |
 | `strix_notes` | create_note 等 | 跨 agent 共享便签（凭据、端点清单、目标怪癖） |
 | `strix_threat_model` | get/amend/save_threat_model | 共享威胁模型：测试前建立，被证伪时必须修正 |

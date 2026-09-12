@@ -9,14 +9,14 @@
 
 ```sh
 cd packages/strix-tools && npm install && npm run build
-npx -y @deepseek-ai/dsh@0.1.2-alpha.5 web --no-open > dsh-boot.log 2>&1 &
+npx -y @deepseek-ai/dsh@0.1.5-rc.2 web --no-open > dsh-boot.log 2>&1 &
 sleep 25 && head -2 dsh-boot.log
 ```
 
 启动日志前两行是健康检查：
 
 ```
-[strix-dsh-tools] registered 15 tool modules (15 tools) + methodology + authorization sections + 75 skills; workspace: C:\Users\20327\.dsh\strix-workspace
+[strix-dsh-tools] registered 16 tool modules + methodology + authorization sections + 75 skills; workspace: C:\Users\20327\.dsh\strix-workspace
 dsh web: http://127.0.0.1:3080/?token=<每次启动随机>
 ```
 
@@ -29,7 +29,7 @@ Windows 提示：若 3080 被历史残留占用，`netstat -ano | findstr :3080`
 **CLI**：
 
 ```sh
-npx -y @deepseek-ai/dsh@0.1.2-alpha.5 --profile headless "Call strix_runs once and quote its full output."
+npx -y @deepseek-ai/dsh@0.1.5-rc.2 --profile headless "Call strix_runs once and quote its full output."
 ```
 
 **真实输出**：

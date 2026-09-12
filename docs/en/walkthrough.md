@@ -9,14 +9,14 @@
 
 ```sh
 cd packages/strix-tools && npm install && npm run build
-npx -y @deepseek-ai/dsh@0.1.2-alpha.5 web --no-open > dsh-boot.log 2>&1 &
+npx -y @deepseek-ai/dsh@0.1.5-rc.2 web --no-open > dsh-boot.log 2>&1 &
 sleep 25 && head -2 dsh-boot.log
 ```
 
 The first two boot-log lines are the health check:
 
 ```
-[strix-dsh-tools] registered 15 tool modules (15 tools) + methodology + authorization sections + 75 skills; workspace: C:\Users\20327\.dsh\strix-workspace
+[strix-dsh-tools] registered 16 tool modules + methodology + authorization sections + 75 skills; workspace: C:\Users\20327\.dsh\strix-workspace
 dsh web: http://127.0.0.1:3080/?token=<random per boot>
 ```
 
@@ -29,7 +29,7 @@ Windows note: if 3080 is held by a leftover process, find the PID with `netstat 
 **CLI**:
 
 ```sh
-npx -y @deepseek-ai/dsh@0.1.2-alpha.5 --profile headless "Call strix_runs once and quote its full output."
+npx -y @deepseek-ai/dsh@0.1.5-rc.2 --profile headless "Call strix_runs once and quote its full output."
 ```
 
 **Real output**:
