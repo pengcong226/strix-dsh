@@ -37,11 +37,11 @@ StriX-DH 把 [Strix](https://github.com/usestrix/strix)（Apache-2.0）的攻击
 
 ```sh
 # 从本仓库目录把 bundle 装进一个 dsh profile
-dsh plugin --profile strix add ./packages/strix-tools
+dsh plugin --profile web add ./packages/strix-tools
 
 # 验证 + 启动
-dsh --profile strix --dump-config   # 应看到 strix-dsh-tools 层
-dsh --profile strix                 # WebUI: http://127.0.0.1:3080
+dsh --profile web --dump-config   # 应看到 strix-dsh-tools 层
+dsh --profile web                 # WebUI: http://127.0.0.1:3080
 ```
 
 可选组件：

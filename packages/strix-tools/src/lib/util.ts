@@ -116,17 +116,34 @@ export async function writeFileAtomic(file: string, data: string): Promise<void>
   const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`
   writeFileSync(tmp, data, { encoding: 'utf8' })
   const { renameSync } = await import('node:fs')
-  try {
-    renameSync(tmp, file)
-  } catch {
-    // Rename failed (e.g. cross-device): fall back to a direct write after
-    // best-effort tmp cleanup. Atomicity is lost but the write still lands.
+  // Windows: a concurrent reader (another agent listing findings) briefly
+  // holds the target and rename throws EPERM/EBUSY — transient, so retry a
+  // few times before degrading. (The tmp file lives in the same directory,
+  // so a cross-device EXDEV is not actually reachable; the old comment
+  // claimed it anyway.)
+  for (let attempt = 0; ; attempt++) {
     try {
-      rmSync(tmp, { force: true })
-    } catch {
-      /* ignore */
+      renameSync(tmp, file)
+      return
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code
+      const retryable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
+      if (retryable && attempt < 4) {
+        await new Promise((r) => setTimeout(r, 25 * (attempt + 1)))
+        continue
+      }
+      // Non-retryable (or retries exhausted): last-resort direct write. A
+      // possibly-torn file is better than a lost update — readers skip torn
+      // JSON fail-soft, and the previous version's tmp is orphaned, not
+      // overwriting anything.
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        /* ignore */
+      }
+      writeFileSync(file, data, { encoding: 'utf8' })
+      return
     }
-    writeFileSync(file, data, { encoding: 'utf8' })
   }
 }
 

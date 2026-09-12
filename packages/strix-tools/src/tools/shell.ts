@@ -41,7 +41,16 @@ export function registerShell(ctx: Context, config: ConfigType) {
       },
       async execute(raw: Record<string, unknown>, exec): Promise<string> {
         const args = raw as unknown as { command: string; timeout_ms?: number; image?: string; network?: boolean; workdir?: string; background?: boolean }
-        const image = args.image ?? config.shellImage
+        const image = args.image?.trim() || config.shellImage
+        // Format guard in EVERY mode: a `-`-prefixed or whitespace-bearing
+        // image would be parsed by docker as a new FLAG (e.g. `--privileged`)
+        // in the image slot — and under a prefix-type auto-allow pattern the
+        // command text matches while the smuggled flag never gets a human
+        // look. Reject before anything else, no matter the approval mode.
+        if (image.startsWith('-') || /\s/.test(image)) {
+          return 'REJECTED: bad image name — must be a plain image reference (no leading dash, no whitespace). '
+            + 'If you need a different image, ask the operator to allowlist it (shellAllowedImages) or pass a normal registry/name:tag.'
+        }
         // Image allowlist binds ONLY in unattended mode: with the approval
         // gate on, the image name rides the human-readable approval summary
         // and the operator decides per call. With the gate off nobody reads

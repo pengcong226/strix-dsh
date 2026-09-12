@@ -9,7 +9,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { clampTimeoutMs, safeWorkspacePath, truncate, workspaceDir, workspaceSub } from '../lib/util.js'
-import { isAuthorizationExpired, matchesPreApprovedPost, readAuthorization } from './authorization.js'
+import { isAuthorizationExpired, matchesPreApprovedPost, readAuthorization, targetCoveredByAuth } from './authorization.js'
 
 interface HttpArgs {
   url?: string
@@ -165,21 +165,41 @@ export type PostPolicyOutcome =
 export const STATE_CHANGING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE']
 
 /**
- * Shared state-changing-request spray-guard behind strix_http and
- * strix_proxy replay, so a replayed write cannot bypass the counting,
- * audit stamp, and per-path cap (Strix autonomy enabler, three branches):
- * (a) pre-approved path+body in authorization.json → proceed, stamp the
- *     clearance line (audit trail).
- * (b) non-preapproved but a LIVE (unexpired) attestation exists → proceed,
+ * Normalize a pathname into the per-path budget key: strip matrix params
+ * (`;`), collapse duplicate slashes, drop the trailing slash, lowercase.
+ * `/login`, `/login/`, `/login//`, `/login;a=1`, `/LOGIN` otherwise each
+ * got an INDEPENDENT budget — rotating the path spelling bypassed the cap
+ * (regression). Over-merging only tightens the cap (fail-closed direction).
+ * Pure — unit-tested.
+ */
+export function normalizePathKey(pathname: string): string {
+  let p = pathname.split(';')[0]
+  p = p.replace(/\/{2,}/g, '/')
+  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1)
+  return p.toLowerCase()
+}
+
+/**
+ * Shared state-changing-request spray-guard behind strix_http, strix_proxy
+ * replay, and the browser page guard, so no caller can bypass the counting,
+ * audit stamp, and per-path cap (Strix autonomy enabler, four branches):
+ * (0) a LIVE (unexpired) attestation exists but the target host is NOT
+ *     covered by its targets → REFUSE. Writes are the sensitive class; a
+ *     recorded engagement boundary that state-changing requests can silently
+ *     step outside is not a boundary (mirrors the recon/sast gates).
+ * (a) pre-approved path+body in authorization.json (covered host) →
+ *     proceed, stamp the clearance line (audit trail).
+ * (b) non-preapproved but a live attestation covers the host → proceed,
  *     stamp an audit line with the per-path count, and enforce
  *     httpPostCapPerPath as the spray guard (over-cap refuses and points at
  *     needs_follow_up + pre-approval).
  * (c) no attestation → proceed exactly as before (send, no stamp).
  *
  * Covers POST, PUT, PATCH, and DELETE — the verbs that change server state.
- * Counts are keyed by path across all four verbs (a spray is a spray
- * whatever the verb), and pre-approval entries match exact path+body on any
- * of them. GET/HEAD/OPTIONS stay uncounted by design (reads, not writes).
+ * Counts are keyed by the normalized path across all four verbs (a spray is
+ * a spray whatever the verb and whatever the spelling), and pre-approval
+ * entries match exact path+body on any of them. GET/HEAD/OPTIONS stay
+ * uncounted by design (reads, not writes).
  *
  * Filesystem-touching (reads authorization.json, appends the counts ledger);
  * unit-tested against a scratch workspace.
@@ -190,28 +210,38 @@ export function evaluatePostPolicy(config: ConfigType, url: string, body: string
   if (!STATE_CHANGING_METHODS.includes(method.toUpperCase())) return { proceed: true, note: '' }
   try {
     const urlObj = new URL(url)
+    const pathKey = normalizePathKey(urlObj.pathname)
     const auth = readAuthorization(config)
-    if (matchesPreApprovedPost(auth, urlObj.pathname, body)) {
-      return {
-        proceed: true,
-        note: `\n[pre-approved ${method} ${urlObj.pathname} — operator clearance in authorization.json, proceeded without asking]`,
-      }
-    }
     if (auth && !isAuthorizationExpired(auth)) {
+      // Branch (0): a live attestation bounds the engagement — a write to a
+      // host it does not cover is refused, not silently sent.
+      if (!targetCoveredByAuth(auth, url)) {
+        return {
+          proceed: false,
+          rejection: `REJECTED: ${method} ${urlObj.host} is outside the recorded authorization targets (${auth.targets.join(', ')}). `
+            + 'Ask the operator to extend the attestation (strix_authorization set) — do not test outside the recorded scope.',
+        }
+      }
+      if (matchesPreApprovedPost(auth, urlObj.pathname, body)) {
+        return {
+          proceed: true,
+          note: `\n[pre-approved ${method} ${urlObj.pathname} — operator clearance in authorization.json, proceeded without asking]`,
+        }
+      }
       const cap = config.httpPostCapPerPath
       const counts = readPostCounts(config)
-      const seen = counts[urlObj.pathname] ?? 0
+      const seen = counts[pathKey] ?? 0
       if (cap > 0 && seen >= cap) {
         return {
           proceed: false,
-          rejection: `REJECTED: per-path state-changing cap reached for ${urlObj.pathname} (${seen}/${cap} non-preapproved sends already made under this attestation). `
-            + `Record a needs_follow_up coverage entry naming this path and ask the operator to pre-approve it (authorization.json pre_approved_post_paths) or raise the cap — do not retry with reworded bodies.`,
+          rejection: `REJECTED: per-path state-changing cap reached for ${pathKey} (${seen}/${cap} non-preapproved sends already made under this attestation). `
+            + `Record a needs_follow_up coverage entry naming this path and ask the operator to pre-approve it (authorization.json pre_approved_post_paths) or raise the cap — do not retry with reworded bodies or respelled paths.`,
         }
       }
-      const n = bumpPostCount(config, urlObj.pathname)
+      const n = bumpPostCount(config, pathKey)
       return {
         proceed: true,
-        note: `\n[non-preapproved ${method} ${urlObj.pathname} — live authorization (${auth.targets.join(', ')}), count ${n}/${cap > 0 ? cap : '∞'}, proceeded without asking]`,
+        note: `\n[non-preapproved ${method} ${pathKey} — live authorization (${auth.targets.join(', ')}), count ${n}/${cap > 0 ? cap : '∞'}, proceeded without asking]`,
       }
     }
   } catch {

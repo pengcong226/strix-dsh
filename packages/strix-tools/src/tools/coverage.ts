@@ -16,7 +16,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { mirrorEvent } from '../lib/session-mirror.js'
-import { nextIdAmong, safeId, workspaceSub, writeFileAtomic } from '../lib/util.js'
+import { nextIdAmong, safeId, workspaceSub } from '../lib/util.js'
 
 export const OUTCOMES = ['clean', 'finding', 'needs_follow_up', 'blocked', 'ruled_out'] as const
 
@@ -37,17 +37,23 @@ function ledgerFile(config: ConfigType): string {
 export function readLedger(config: ConfigType): CoverageEntry[] {
   const file = ledgerFile(config)
   if (!existsSync(file)) return []
-  const out: CoverageEntry[] = []
+  // Versioned append-only ledger: an update lands as a NEW row with the same
+  // id, and the reader resolves by id keeping the LAST occurrence. This is
+  // what makes update safe against concurrent records — the previous
+  // full-file rewrite read a snapshot, applied the edit, and wrote the whole
+  // file back, silently swallowing any row another agent had appended in
+  // between (irrecoverable audit loss). Torn lines are skipped, not fatal.
+  const byId = new Map<string, CoverageEntry>()
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (!line.trim()) continue
     try {
       const parsed = JSON.parse(line) as CoverageEntry
-      if (parsed && typeof parsed.id === 'string') out.push(parsed)
+      if (parsed && typeof parsed.id === 'string') byId.set(parsed.id, parsed)
     } catch {
       /* skip the torn line; the rest of the ledger still counts */
     }
   }
-  return out
+  return [...byId.values()]
 }
 
 export function writeLedger(config: ConfigType, entries: CoverageEntry[]): void {
@@ -141,22 +147,29 @@ export function registerCoverage(ctx: Context, config: ConfigType) {
           if (!entry) {
             return `Entry ${id} not found. Ledger:\n${entries.map((e) => `${e.id} ${e.surface}`).join('\n') || '(empty)'}`
           }
-          if (args.surface !== undefined) entry.surface = String(args.surface)
-          if (args.risk_area !== undefined) entry.risk_area = String(args.risk_area)
+          const updated: CoverageEntry = { ...entry }
+          if (args.surface !== undefined) updated.surface = String(args.surface)
+          if (args.risk_area !== undefined) updated.risk_area = String(args.risk_area)
           if (args.outcome !== undefined) {
             if (!OUTCOMES.includes(args.outcome as (typeof OUTCOMES)[number])) {
               return `REJECTED: outcome must be one of ${OUTCOMES.join(', ')}.`
             }
-            entry.outcome = String(args.outcome)
+            updated.outcome = String(args.outcome)
           }
-          if (args.evidence_note !== undefined) entry.evidence_note = String(args.evidence_note)
-          entry.updated_at = new Date().toISOString()
-          await writeFileAtomic(ledgerFile(config), entries.map((e) => JSON.stringify(e)).join('\n') + '\n')
+          if (args.evidence_note !== undefined) updated.evidence_note = String(args.evidence_note)
+          updated.updated_at = new Date().toISOString()
+          // Append-only versioning: the update lands as a NEW row with the
+          // same id (readLedger resolves last-wins). A full-file rewrite here
+          // read a snapshot at execute start and wrote the whole ledger back,
+          // silently dropping any row a concurrent agent had appended in
+          // between — the exact race the record path was fixed to avoid.
+          // The raw file now also keeps the full edit history for audit.
+          appendFileSync(ledgerFile(config), JSON.stringify(updated) + '\n', 'utf8')
           mirrorEvent(exec, 'strix/coverage', {
             action: 'update',
-            entry: { id: entry.id, surface: entry.surface, risk_area: entry.risk_area, outcome: entry.outcome, evidence_note: entry.evidence_note },
+            entry: { id: updated.id, surface: updated.surface, risk_area: updated.risk_area, outcome: updated.outcome, evidence_note: updated.evidence_note },
           })
-          return `Moved ${id}: ${entry.surface} — ${entry.risk_area} → ${entry.outcome}.`
+          return `Moved ${id}: ${updated.surface} — ${updated.risk_area} → ${updated.outcome}.`
         }
 
         return `REJECTED: unknown action "${args.action}". Use record | update | list.`

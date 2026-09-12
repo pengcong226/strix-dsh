@@ -90,14 +90,25 @@ interface BrowserLike {
 interface ContextLike {
   newPage(): Promise<PageLike>
   close(): Promise<unknown>
+  /** Context-level routing covers every page INCLUDING popups (window.open / target=_blank). */
+  route(pattern: string, handler: (route: GuardedRoute) => Promise<void>): Promise<unknown>
 }
 
 interface Session {
   browser: BrowserLike
   context: ContextLike
   page: PageLike
-  /** Spray-guard route installed once per page; later calls reuse it. */
+  /** Spray-guard route installed once per context; later calls reuse it. */
   guardInstalled: boolean
+  /**
+   * Session-level guard notes. The route handler is installed ONCE but
+   * pushes verdicts on every request across every execute call — so the
+   * array must live on the session, not in a per-call closure (the closure
+   * captured the first call's array and every verdict from the second call
+   * on vanished into an orphan — regression). Each call drains what
+   * accumulated during its action.
+   */
+  guardNotes: string[]
 }
 
 const sessions = new Map<string, Session>()
@@ -122,9 +133,13 @@ async function getSession(config: ConfigType, session: string): Promise<Session>
     )
   }
   const browser = await pw.chromium.launch({ headless: config.browserHeadless })
-  const context = await browser.newContext()
+  // serviceWorkers: 'block' — a service worker's fetches bypass page/context
+  // routing, which would make the spray-guard (and any page-level policy)
+  // unenforceable for SW-driven writes. Blocking SW entirely is the only
+  // sound default for a validation browser.
+  const context = await browser.newContext({ serviceWorkers: 'block' })
   const page = await context.newPage()
-  const entry: Session = { browser, context, page, guardInstalled: false }
+  const entry: Session = { browser, context, page, guardInstalled: false, guardNotes: [] }
   sessions.set(session, entry)
   return entry
 }
@@ -190,23 +205,47 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
         // The page is long-lived: navigation, cookies, and localStorage from
         // previous calls in this session are still here.
         const page = entry.page
-        // Automated enforcement, no human: intercept every request the page
-        // fires and run writes through the shared spray-guard. Reads take a
-        // fast path; the verdicts accumulate into guardNotes per call.
-        const guardNotes: string[] = []
-        const withNotes = (text: string): string =>
-          guardNotes.length > 0 ? `${text}\n${guardNotes.join('\n')}` : text
+        // Automated enforcement, no human: intercept every request the
+        // context fires (page + popups) and run writes through the shared
+        // spray-guard. Reads take a fast path; verdicts accumulate in the
+        // SESSION-level guardNotes and each call drains what its action
+        // produced.
+        const withNotes = (text: string): string => {
+          if (entry.guardNotes.length === 0) return text
+          const drained = entry.guardNotes.splice(0, entry.guardNotes.length)
+          return `${text}\n${drained.join('\n')}`
+        }
         if (config.browserEnforcePostPolicy && !entry.guardInstalled) {
           try {
-            await page.route('**/*', createSprayGuardHandler(config, guardNotes))
+            // Context-level route: covers the page AND popups opened from it
+            // (window.open / target=_blank) — page.route would leave popup
+            // writes completely unguarded.
+            await entry.context.route('**/*', createSprayGuardHandler(config, entry.guardNotes))
             entry.guardInstalled = true
           } catch {
-            guardNotes.push('Warning: browser spray-guard route could not attach — writes on this page are uncounted.')
+            // Fail-closed: without the guard, writes on this session would
+            // be uncounted and uncapped — the tool promises the operator
+            // "over-cap writes are aborted before they leave", so a session
+            // we cannot enforce on must not run actions at all.
+            return 'REJECTED: browser spray-guard could not attach to this session — write enforcement is unavailable, '
+              + 'so no action runs. Close the session (action=close) and retry; if it persists, check the Playwright install '
+              + 'or disable browserEnforcePostPolicy only if you accept unguarded pages.'
           }
         }
         switch (args.action) {
             case 'navigate': {
               if (!args.url) return 'REJECTED: url is required for navigate.'
+              // Scheme guard: file:// turns navigate+content/screenshot into a
+              // local-file read channel (and chrome:// leaks environment
+              // info) — a validation browser only speaks http(s).
+              try {
+                const scheme = new URL(args.url).protocol.replace(':', '').toLowerCase()
+                if (scheme !== 'http' && scheme !== 'https') {
+                  return `REJECTED: navigate only accepts http/https URLs (got "${scheme}:"). Local files and browser-internal pages are out of scope.`
+                }
+              } catch {
+                return `REJECTED: could not parse url "${args.url}".`
+              }
               await page.goto(args.url, { waitUntil: args.wait_until ?? 'load', timeout: 30_000 })
               // Wrap as an expression: a bare identifier like `document.title`
               // evaluates to undefined in Playwright's expression context.

@@ -6,11 +6,12 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { workspaceDir } from '../lib/util.js'
 import { formatUsd, readBudget } from './budget.js'
+import { readLedger } from './coverage.js'
 import { listFindings } from './finding.js'
 
 export function registerRuns(ctx: Context, config: ConfigType) {
@@ -46,8 +47,10 @@ export function registerRuns(ctx: Context, config: ConfigType) {
 
         const ledger = join(ws, 'coverage', 'ledger.jsonl')
         if (existsSync(ledger)) {
-          const n = readFileSync(ledger, 'utf8').split('\n').filter((l) => l.trim()).length
-          lines.push(`coverage: ${n} surface(s) recorded`)
+          // Count RESOLVED entries (unique ids, torn lines skipped) — the raw
+          // line count also counts superseded version rows and torn lines,
+          // drifting from what strix_coverage list actually shows.
+          lines.push(`coverage: ${readLedger(config).length} surface(s) recorded`)
         } else {
           lines.push('coverage: empty')
         }

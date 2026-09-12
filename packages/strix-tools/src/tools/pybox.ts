@@ -67,6 +67,20 @@ export function registerPybox(ctx: Context, config: ConfigType) {
         if (packages && !validPipPackages(packages)) {
           return 'REJECTED: install_packages allows only package names with version pins (==, >=, ~=, extras [...]) — no flags (--index-url, -r, --find-links).'
         }
+        // Validate every files entry up front: a bad name or non-string
+        // content must reject BEFORE anything is written. Previously the
+        // check ran inside the write loop — main.py, args.json, and every
+        // earlier valid entry had already landed by the time the loop hit
+        // the first bad one (partial-write residue after a REJECTED), and a
+        // non-string content crashed writeFileSync outright.
+        for (const [name, content] of Object.entries(args.files ?? {})) {
+          if (!safeId(name)) {
+            return `REJECTED: file entry "${name}" must be a plain filename (letters, digits, dash, underscore, dot — no path separators, no leading dot).`
+          }
+          if (typeof content !== 'string') {
+            return `REJECTED: file entry "${name}" content must be a string.`
+          }
+        }
         // Match on the FULL script, display truncated+hash-stamped (same
         // truncation-before-match fix as strix_shell).
         const firstLine = args.script.split('\n').find((l) => l.trim()) ?? ''
@@ -86,9 +100,7 @@ export function registerPybox(ctx: Context, config: ConfigType) {
           writeFileSync(join(runDir, 'args.json'), JSON.stringify(args.arguments, null, 2), 'utf8')
         }
         for (const [name, content] of Object.entries(args.files ?? {})) {
-          if (!safeId(name)) {
-            return `REJECTED: file entry "${name}" must be a plain filename (letters, digits, dash, underscore, dot — no path separators, no leading dot).`
-          }
+          // Names and content were validated before the approval gate.
           writeFileSync(join(runDir, name), content, 'utf8')
         }
 

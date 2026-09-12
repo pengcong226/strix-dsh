@@ -3,7 +3,7 @@
  * raw-request parsing, finding validation, ledger round-trips, and the
  * bounded-output helper. No Docker, no network, no LLM — safe in CI.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -15,7 +15,7 @@ import { checkExtraArgs, SEMGREP_BLOCKED_EXTRA_FLAGS, semgrepTargetAllowed } fro
 import { matchesAutoAllow, splitApprovalSummary } from '../src/lib/approval.js'
 import { methodologySection } from '../src/index.js'
 import { formatDepFinding, parseOsvVuln, readKevCache, sortDepFindings } from '../src/tools/depcheck.js'
-import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_METHODS } from '../src/tools/http.js'
+import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_METHODS, normalizePathKey } from '../src/tools/http.js'
 import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, listFindings, missingFinishSections, registerFinding, registerReport, validateFinding } from '../src/tools/finding.js'
 import { OUTCOMES, readLedger, registerCoverage, writeLedger } from '../src/tools/coverage.js'
 import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, registerAuthorization, renderAuthorizationSection, targetCoveredByAuth } from '../src/tools/authorization.js'
@@ -27,7 +27,8 @@ import { buildBackgroundDockerArgs, jobLabel } from '../src/lib/jobs.js'
 import { registerThreatModel } from '../src/tools/threat-model.js'
 import { createSprayGuardHandler, registerBrowser, type GuardedRoute } from '../src/tools/browser.js'
 import { mirrorEvent } from '../src/lib/session-mirror.js'
-import { filterFlows, formatFlow, pidOwnedByDockerCli, procCmdlineIsDockerCli, proxyImageKey, readFlows, tasklistRowIsDockerCli } from '../src/tools/proxy.js'
+import { filterFlows, formatFlow, pidOwnedByDockerCli, procCmdlineIsDockerCli, proxyImageKey, readFlows, stopSidecarWith, tasklistRowIsDockerCli } from '../src/tools/proxy.js'
+import { registerShell } from '../src/tools/shell.js'
 import { buildHttpxArgs, isSafeDomain } from '../src/tools/recon.js'
 import {
   SARIF_FILENAME,
@@ -170,6 +171,32 @@ describe('coverage ledger round-trip', () => {
     expect(entries[0]?.outcome).toBe('ruled_out')
     expect(entries[0]?.evidence_note).toContain('no login')
   })
+
+  it('update appends a version row and never swallows concurrent records (P0 regression)', async () => {
+    const config = scratchConfig()
+    const regs: unknown[] = []
+    registerCoverage({ tools: { register: (d: unknown) => regs.push(d) } } as never, config)
+    const tool = regs[0] as { execute: (raw: Record<string, unknown>, exec: unknown) => Promise<string> }
+    await tool.execute({ action: 'record', surface: 'a.example.com', risk_area: 'xss', outcome: 'clean' }, {})
+    await tool.execute({ action: 'record', surface: 'b.example.com', risk_area: 'xss', outcome: 'clean' }, {})
+    // A concurrent agent appends C-003 directly — the exact race the old
+    // full-file rewrite lost (read snapshot → rewrite swallowed the row).
+    appendFileSync(
+      join(config.workspaceDir, 'coverage', 'ledger.jsonl'),
+      JSON.stringify({ id: 'C-003', surface: 'c.example.com', risk_area: 'xss', outcome: 'clean', recorded_at: 't' }) + '\n',
+      'utf8',
+    )
+    const res = await tool.execute({ action: 'update', id: 'C-001', outcome: 'ruled_out' }, {})
+    expect(res).toMatch(/^Moved C-001/)
+    const entries = readLedger(config)
+    expect(entries.map((e) => e.id).sort()).toEqual(['C-001', 'C-002', 'C-003'])
+    const c1 = entries.find((e) => e.id === 'C-001')
+    expect(c1?.outcome).toBe('ruled_out')
+    expect(c1?.updated_at).toBeTruthy()
+    // The raw file keeps the full version history (audit trail).
+    const raw = readFileSync(join(config.workspaceDir, 'coverage', 'ledger.jsonl'), 'utf8')
+    expect(raw.trim().split('\n')).toHaveLength(4)
+  })
 })
 
 describe('findings store', () => {
@@ -206,20 +233,57 @@ describe('dedupe-check', () => {
       severity: 'high', target: 'package.json lodash CVE-2021-23337 npm', description: 'lodash command injection via template',
       evidence: 'npm audit', created_at: 't1',
     },
+    {
+      id: 'F-003', title: 'SQLi in search q param', vulnerability_type: 'sqli',
+      severity: 'high', target: 'https://example.com/search?q=x', description: 'q unsanitized',
+      evidence: 'SELECT 1 → 1', created_at: 't2',
+    },
   ]
 
-  it('flags same type + endpoint + overlapping target as duplicate', () => {
+  it('flags same type + endpoint + same target (both bare) as duplicate', () => {
     const v = checkDuplicate(
-      { title: 'login SQL injection', vulnerability_type: 'sqli', target: 'https://example.com/login?user=x' },
+      { title: 'login SQL injection', vulnerability_type: 'sqli', target: 'https://example.com/login' },
       registered,
     )
     expect(v.duplicate).toBe(true)
     expect(v.existing_id).toBe('F-001')
   })
 
+  it('flags the same param on the same endpoint as duplicate (re-file with a different value)', () => {
+    const v = checkDuplicate(
+      { title: 'search SQL injection again', vulnerability_type: 'sqli', target: 'https://example.com/search?q=other' },
+      registered,
+    )
+    expect(v.duplicate).toBe(true)
+    expect(v.existing_id).toBe('F-003')
+  })
+
+  it('P0 regression: clears a DIFFERENT param on the same endpoint (q vs sort)', () => {
+    // The old word-overlap check matched URL structure words (scheme, host,
+    // first segment) that every same-endpoint target shares — this pair was
+    // ALWAYS flagged duplicate and the second real finding was silently
+    // swallowed.
+    const v = checkDuplicate(
+      { title: 'SQL injection in sort parameter', vulnerability_type: 'sqli', target: 'https://example.com/search?sort=price' },
+      registered,
+    )
+    expect(v.duplicate).toBe(false)
+  })
+
+  it('treats bare-vs-detailed targets as ambiguous (not duplicate)', () => {
+    // Existing filed bare, candidate adds param detail — could be a re-file
+    // with more detail OR a distinct param-specific finding. Fail toward
+    // filing: the pipeline tolerates a double-file, not a silent swallow.
+    const v = checkDuplicate(
+      { title: 'login SQL injection', vulnerability_type: 'sqli', target: 'https://example.com/login?user=x' },
+      registered,
+    )
+    expect(v.duplicate).toBe(false)
+  })
+
   it('clears different endpoints with the same type', () => {
     const v = checkDuplicate(
-      { title: 'search SQL injection', vulnerability_type: 'sqli', target: 'https://example.com/search?q=x' },
+      { title: 'search SQL injection', vulnerability_type: 'sqli', target: 'https://example.com/other?q=x' },
       registered,
     )
     expect(v.duplicate).toBe(false)
@@ -585,6 +649,28 @@ describe('authorization attestation', () => {
     expect(targetCoveredByAuth(auth, '')).toBe(false)
     expect(targetCoveredByAuth(null, 'https://example.com/')).toBe(false)
     expect(targetCoveredByAuth({ ...auth, valid_until: '2020-01-01T00:00:00.000Z' }, 'https://example.com/')).toBe(false)
+  })
+
+  it('host-boundary coverage: example.com never covers notexample.com (regression)', () => {
+    const auth = { targets: ['example.com'], granted_by: 'test', recorded_at: 't0' }
+    // The old bidirectional substring matched these — recon/sast then sent
+    // active probing traffic at a different organization's domain.
+    expect(targetCoveredByAuth(auth, 'notexample.com')).toBe(false)
+    expect(targetCoveredByAuth(auth, 'https://notexample.com/')).toBe(false)
+    expect(targetCoveredByAuth(auth, 'https://sub.notexample.com/x')).toBe(false)
+    expect(targetCoveredByAuth({ targets: ['sub.example.com'], granted_by: 't', recorded_at: 't0' }, 'notsub.example.com')).toBe(false)
+    // Subdomains in both directions still covered (unchanged semantics).
+    expect(targetCoveredByAuth(auth, 'https://deep.sub.example.com/x')).toBe(true)
+    expect(targetCoveredByAuth({ targets: ['sub.example.com'], granted_by: 't', recorded_at: 't0' }, 'https://example.com/')).toBe(true)
+  })
+
+  it('port semantics: portless scope covers any port; port-pinned scope covers only that port', () => {
+    const any = { targets: ['example.com'], granted_by: 't', recorded_at: 't0' }
+    expect(targetCoveredByAuth(any, 'https://example.com:8080/x')).toBe(true)
+    const pinned = { targets: ['example.com:8080'], granted_by: 't', recorded_at: 't0' }
+    expect(targetCoveredByAuth(pinned, 'https://example.com:8080/x')).toBe(true)
+    expect(targetCoveredByAuth(pinned, 'https://example.com/')).toBe(false)
+    expect(targetCoveredByAuth(pinned, 'https://example.com:9090/x')).toBe(false)
   })
 
   it('set keeps prior lists when omitted and reports dropped malformed entries', async () => {
@@ -1035,6 +1121,101 @@ describe('shared POST policy', () => {
   it('derives the proxy image match key from config', () => {
     expect(proxyImageKey(scratchConfig())).toBe('mitmproxy/mitmproxy')
     expect(proxyImageKey({ ...scratchConfig(), proxyImage: 'custom/proxy:2.0' })).toBe('custom/proxy')
+  })
+
+  it('refuses writes to hosts outside the recorded attestation targets', () => {
+    const config = scratchConfig()
+    writeFileSync(authorizationPath(config), JSON.stringify(authDoc), 'utf8')
+    const verdict = evaluatePostPolicy(config, 'https://other.test/login', 'a=1')
+    expect(verdict.proceed).toBe(false)
+    if (!verdict.proceed) expect(verdict.rejection).toMatch(/outside the recorded authorization targets/)
+    // Pre-approval never clears an out-of-scope host either.
+    const smuggled = evaluatePostPolicy(config, 'https://other.test/ok', 'ping')
+    expect(smuggled.proceed).toBe(false)
+    // Reads to any host stay free (only writes are bounded).
+    expect(evaluatePostPolicy(config, 'https://other.test/login', '', 'GET')).toEqual({ proceed: true, note: '' })
+  })
+
+  it('shares one budget across path spellings (variant-bypass regression)', () => {
+    const config = scratchConfig()
+    writeFileSync(authorizationPath(config), JSON.stringify(authDoc), 'utf8')
+    const capped = { ...config, httpPostCapPerPath: 1 }
+    expect(evaluatePostPolicy(capped, 'https://example.com/login', 'a=1').proceed).toBe(true)
+    // Trailing slash, duplicate slash, and matrix params used to each open a
+    // FRESH budget — rotating the spelling bypassed the cap entirely.
+    expect(evaluatePostPolicy(capped, 'https://example.com/login/', 'a=1').proceed).toBe(false)
+    expect(evaluatePostPolicy(capped, 'https://example.com/login//', 'a=1').proceed).toBe(false)
+    expect(evaluatePostPolicy(capped, 'https://example.com/login;a=1', 'a=1').proceed).toBe(false)
+    expect(evaluatePostPolicy(capped, 'https://example.com/LOGIN', 'a=1').proceed).toBe(false)
+  })
+
+  it('normalizes path keys: matrix params, duplicate slashes, trailing slash, case', () => {
+    expect(normalizePathKey('/login')).toBe('/login')
+    expect(normalizePathKey('/login/')).toBe('/login')
+    expect(normalizePathKey('/login//')).toBe('/login')
+    expect(normalizePathKey('/login;a=1')).toBe('/login')
+    expect(normalizePathKey('/LOGIN')).toBe('/login')
+    expect(normalizePathKey('/a//b/')).toBe('/a/b')
+    expect(normalizePathKey('/')).toBe('/')
+  })
+
+  describe('proxy stop decision (ghost-container regression)', () => {
+    it('stops the container even when the CLI kill succeeded', async () => {
+      const calls: string[] = []
+      const out = await stopSidecarWith({ pid: 1, port: 8080 }, {
+        killCli: async () => { calls.push('kill'); return true },
+        findContainer: async () => { calls.push('find'); return 'abc' },
+        dockerStop: (id) => { calls.push(`stop:${id}`); return true },
+      })
+      // The old code short-circuited after a successful kill: the daemon-side
+      // container kept listening and capturing while stop reported success.
+      expect(out.stopped).toBe(true)
+      expect(calls).toEqual(['kill', 'find', 'stop:abc'])
+    })
+
+    it('fails when the container exists but docker stop fails', async () => {
+      const out = await stopSidecarWith({ pid: 1, port: 8080 }, {
+        killCli: async () => true,
+        findContainer: async () => 'abc',
+        dockerStop: () => false,
+      })
+      expect(out.stopped).toBe(false)
+    })
+
+    it('succeeds with a cli kill alone when no container is found', async () => {
+      const out = await stopSidecarWith({ pid: 1, port: 8080 }, {
+        killCli: async () => true,
+        findContainer: async () => null,
+        dockerStop: () => { throw new Error('unreachable') },
+      })
+      expect(out.stopped).toBe(true)
+    })
+
+    it('prefers the recorded container id and skips the port scan', async () => {
+      const out = await stopSidecarWith({ pid: 1, container: 'xyz', port: 8080 }, {
+        killCli: async () => false,
+        findContainer: async () => { throw new Error('should not be called') },
+        dockerStop: (id) => id === 'xyz',
+      })
+      expect(out.stopped).toBe(true)
+    })
+  })
+
+  it('strix_shell rejects dash-prefixed and whitespace images before anything runs', async () => {
+    const config = scratchConfig()
+    const regs: unknown[] = []
+    registerShell({ tools: { register: (d: unknown) => regs.push(d) } } as never, config)
+    const tool = regs[0] as { execute: (raw: Record<string, unknown>, exec: unknown) => Promise<string> }
+    // A `-`-prefixed image lands in the image slot of `docker run` and is
+    // parsed as a FLAG (--privileged); under a prefix auto-allow pattern the
+    // command text matches while the smuggled flag never gets a human look.
+    const r1 = await tool.execute({ command: 'echo hi', image: '--privileged evil' }, { name: 'strix_shell', callId: 't1' })
+    expect(r1).toMatch(/REJECTED: bad image name/)
+    const r2 = await tool.execute({ command: 'echo hi', image: 'kal i:latest' }, { name: 'strix_shell', callId: 't2' })
+    expect(r2).toMatch(/REJECTED: bad image name/)
+    // An empty image falls back to the configured default instead of ''.
+    const r3 = await tool.execute({ command: 'echo hi', image: '' }, { name: 'strix_shell', callId: 't3' })
+    expect(r3).not.toMatch(/REJECTED: bad image name/)
   })
 })
 

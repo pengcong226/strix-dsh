@@ -94,21 +94,47 @@ export function matchesPreApprovedPost(
 /**
  * Is `target` (URL or domain) covered by a live attestation? Scope entries
  * and the target are normalized (lowercased, scheme and trailing path
- * stripped) and compared as substring in either direction, so a scope of
- * `example.com` covers `https://sub.example.com/login`. Deliberately
- * permissive: the attestation is operator-written and this is a backstop,
- * not a scope oracle — the model discipline ("stay inside these targets")
- * remains the primary control. Pure — unit-tested.
+ * stripped) and compared with HOST-BOUNDARY semantics: exact host match, or
+ * subdomain in either direction (`example.com` covers `sub.example.com`).
+ * A bare substring match would let `example.com` cover the unrelated
+ * `notexample.com` — that sent recon/sast traffic at out-of-scope hosts
+ * (regression: bidirectional `includes` had no word boundary). Ports: a
+ * scope without a port covers any port on its host; a port-pinned scope
+ * covers only that port. Deliberately permissive on subdomains: the
+ * attestation is operator-written and this is a backstop, not a scope
+ * oracle — the model discipline ("stay inside these targets") remains the
+ * primary control. Pure — unit-tested.
  */
 export function targetCoveredByAuth(auth: Authorization | null, target: string): boolean {
   if (!auth || isAuthorizationExpired(auth)) return false
   const norm = (s: string) => s.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/[/\\?#].*$/, '')
   const t = norm(target)
   if (!t) return false
-  return (auth.targets ?? []).some((scope) => {
-    const s = norm(scope)
-    return !!s && (t.includes(s) || s.includes(t))
+  const [tHost, tPort] = splitHostPort(t)
+  if (!tHost) return false
+  return (auth.targets ?? []).some((raw) => {
+    const s = norm(raw)
+    if (!s) return false
+    if (s === t) return true
+    const [sHost, sPort] = splitHostPort(s)
+    if (!sHost) return false
+    // Port compatibility: a scope without a port covers any port; a
+    // port-pinned scope covers only that port (a port-less target is a
+    // different effective port, not a wildcard).
+    const portOk = sPort === '' || sPort === tPort
+    return portOk && (
+      sHost === tHost
+      || tHost.endsWith('.' + sHost)
+      || sHost.endsWith('.' + tHost)
+    )
   })
+}
+
+/** Split `host` / `host:port` (numeric port only; IPv6 brackets survive). Pure. */
+function splitHostPort(h: string): [host: string, port: string] {
+  const i = h.lastIndexOf(':')
+  if (i > -1 && /^\d+$/.test(h.slice(i + 1))) return [h.slice(0, i), h.slice(i + 1)]
+  return [h, '']
 }
 
 const FILE = 'authorization.json'

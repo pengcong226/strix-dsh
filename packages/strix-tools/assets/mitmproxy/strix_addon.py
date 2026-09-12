@@ -56,7 +56,12 @@ class StrixLogger:
         if rsp is None:
             return
         fid = self._next_id()
-        raw_req = req.method.encode() + b" " + req.path.encode() + b" HTTP/1.1\r\n"
+        # Absolute-form request line (method + full URL): preserves the
+        # scheme so an HTTPS capture replays over HTTPS. The previous
+        # origin-form line (method + path) forced the replay parser to
+        # rebuild the URL as http:// — replaying captured HTTPS credentials
+        # in cleartext.
+        raw_req = req.method.encode() + b" " + req.url.encode() + b" HTTP/1.1\r\n"
         for k, v in req.headers.items():
             raw_req += f"{k}: {v}\r\n".encode()
         raw_req += b"\r\n" + (req.content or b"")

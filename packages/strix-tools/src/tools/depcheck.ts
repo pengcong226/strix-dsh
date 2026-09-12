@@ -211,6 +211,11 @@ export function registerDepcheck(ctx: Context, config: ConfigType) {
           if (pkgs.length === 0) return 'REJECTED: packages (at least one {ecosystem, name, version}) is required for check.'
           if (pkgs.length > 50) return 'REJECTED: at most 50 packages per check (OSV batch limits).'
           for (const p of pkgs) {
+            // Null/non-object elements crash the optional chain below —
+            // reject them as malformed input instead.
+            if (!p || typeof p !== 'object') {
+              return 'REJECTED: every packages entry must be an object {ecosystem, name, version}.'
+            }
             if (!p.ecosystem?.trim() || !p.name?.trim() || !p.version?.trim()) {
               return 'REJECTED: every package needs ecosystem, name, and version.'
             }

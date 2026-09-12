@@ -12,6 +12,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         node: ['20', '22']
     runs-on: ${{ matrix.os }}
+    # A hung job otherwise parks the runner for the full 6h default.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: packages/strix-tools

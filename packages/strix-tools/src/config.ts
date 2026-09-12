@@ -111,9 +111,12 @@ export interface ConfigType {
 export const Config = z
   .object({
     workspaceDir: z.string().default(''),
-    httpTimeoutMs: z.number().default(30_000),
-    httpMaxBodyChars: z.number().default(20_000),
-    httpPostCapPerPath: z.number().default(5),
+    httpTimeoutMs: z.number().min(1).default(30_000),
+    httpMaxBodyChars: z.number().min(1).default(20_000),
+    // min(0): a negative or NaN cap silently disabled the spray guard
+    // (cap > 0 checks) — the schema must fail loudly instead, per this
+    // repo's own convention.
+    httpPostCapPerPath: z.number().min(0).default(5),
     shellImage: z.string().default('python:3.12-slim'),
     shellAllowedImages: z.array(z.string()).default([]),
     shellNetwork: z.boolean().default(true),
@@ -135,7 +138,7 @@ export const Config = z
     strictEvidence: z.boolean().default(true),
     approvalGate: z.union(['always', 'off'] as const).default('always'),
     approvalAutoAllow: z.array(z.string()).default([]),
-    budgetLimitUsd: z.number().default(0),
+    budgetLimitUsd: z.number().min(0).default(0),
     budgetInputPer1k: z.number().default(0.00027),
     budgetOutputPer1k: z.number().default(0.0004),
     budgetAction: z.union(['warn', 'block'] as const).default('warn'),

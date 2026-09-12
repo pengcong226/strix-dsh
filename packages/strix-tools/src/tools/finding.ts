@@ -116,15 +116,35 @@ function endpointKey(target: string): string {
 }
 
 /**
+ * Distinguishing detail of a target beyond its endpoint key: query param
+ * names/values and path segments after the first, tokenized. Two findings
+ * on the same endpoint are the same finding only when these intersect (or
+ * both are empty). Pure.
+ */
+function restTokens(target: string): Set<string> {
+  const rest = norm(target).slice(norm(endpointKey(target)).length)
+  return new Set(rest.split(/[^a-z0-9]+/).filter((w) => w.length > 0))
+}
+
+/**
  * Deterministic duplicate check (no LLM) over registered findings, ported
  * from the identity half of Strix's report/dedupe.py:
  *
  * - dependency_cve: same CVE + package (+ ecosystem when both carry it) is a
  *   duplicate — unless both carry different manifest paths (same flaw in two
  *   manifests is two findings).
- * - others: same vulnerability_type + same endpoint key + overlapping target
- *   text is a duplicate. Different types, different endpoints, or disjoint
- *   targets are NOT duplicates (e.g. SQLi in /login vs /search).
+ * - others: same vulnerability_type + same endpoint key + overlapping
+ *   target DETAIL (query params / deeper path segments) is a duplicate.
+ *   Different types, different endpoints, or disjoint details are NOT
+ *   duplicates (e.g. SQLi in the `q` param vs SQLi in the `sort` param of
+ *   the same /search endpoint are two findings).
+ *
+ *   Regression note: the previous check overlapped words from title+target
+ *   against title+target+description — but on the same endpoint the URL
+ *   structure words (scheme, host, first segment) are shared by
+ *   construction, so the overlap was ALWAYS true and every second
+ *   same-endpoint same-type finding was silently swallowed as a duplicate.
+ *   The signal now lives in the detail tokens past the endpoint prefix.
  *
  * Pure — unit-tested. The LLM-judge half (same root cause argued from prose)
  * stays a model task: callers pass ambiguous pairs here first and only file
@@ -168,11 +188,16 @@ export function checkDuplicate(
     const cTarget = String(candidate.target ?? '')
     if (!cTarget.trim()) continue
     if (endpointKey(cTarget) !== endpointKey(f.target)) continue
-    const cWords = new Set(norm(`${candidate.title} ${cTarget}`).split(/[^a-z0-9]+/).filter((w) => w.length > 2))
-    const fText = norm(`${f.title} ${f.target} ${f.description}`)
-    const overlap = [...cWords].some((w) => fText.includes(w))
-    if (overlap) {
-      return { duplicate: true, existing_id: f.id, reason: `same type (${cType}) + same endpoint (${endpointKey(cTarget)}) + overlapping target text as ${f.id}.` }
+    const cRest = restTokens(cTarget)
+    const fRest = restTokens(String(f.target ?? ''))
+    // Same endpoint + both targets carry no distinguishing detail → same
+    // place, same type, nothing to tell them apart → duplicate. Otherwise
+    // the details must actually intersect (same param / same deeper segment).
+    const isDuplicate =
+      (cRest.size === 0 && fRest.size === 0)
+      || [...cRest].some((w) => fRest.has(w))
+    if (isDuplicate) {
+      return { duplicate: true, existing_id: f.id, reason: `same type (${cType}) + same endpoint (${endpointKey(cTarget)}) + overlapping target detail (params/segments) as ${f.id}.` }
     }
   }
   if (manifestMismatch) {
@@ -181,7 +206,7 @@ export function checkDuplicate(
       reason: `same CVE/package as ${manifestMismatch.id} but different manifest context (${manifestMismatch.manifest}); file separately.`,
     }
   }
-  return { duplicate: false, reason: 'no registered finding shares type + endpoint + target text.' }
+  return { duplicate: false, reason: 'no registered finding shares type + endpoint + target detail.' }
 }
 
 export function validateFinding(args: Record<string, unknown>, strict: boolean): string | null {
@@ -337,6 +362,14 @@ export function registerFinding(ctx: Context, config: ConfigType) {
           if (config.strictEvidence && args.evidence !== undefined && !String(args.evidence).trim()) {
             return 'REJECTED: strict mode forbids emptying the evidence of a registered finding. '
               + 'If the PoC no longer reproduces, update the evidence to state that and lower the severity/confidence instead.'
+          }
+          // Blank title/target would corrupt the registry: an empty target
+          // also drops the finding out of every future dedupe comparison.
+          if (args.title !== undefined && !String(args.title).trim()) {
+            return 'REJECTED: title cannot be blanked. Pass a meaningful title or omit the field.'
+          }
+          if (args.target !== undefined && !String(args.target).trim()) {
+            return 'REJECTED: target cannot be blanked — dedupe and the report rely on it. Omit the field to keep the current value.'
           }
           const mutable = ['title', 'vulnerability_type', 'severity', 'target', 'description', 'evidence', 'cvss_vector', 'counterevidence', 'confidence', 'poc_script', 'remediation', 'code_locations', 'fix_pr_body'] as const
           for (const key of mutable) {

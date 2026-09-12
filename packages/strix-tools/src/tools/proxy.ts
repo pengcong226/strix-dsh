@@ -95,6 +95,48 @@ export function proxyImageKey(config: ConfigType): string {
   return config.proxyImage.split(':')[0] ?? 'mitmproxy/mitmproxy'
 }
 
+/** Injectable effects behind stopSidecarWith — real ones shell out; tests fake them. */
+export interface StopSidecarEffects {
+  /** Kill the docker CLI attach process (after OS-level pid verification). */
+  killCli(pid: number): Promise<boolean>
+  /** Locate the daemon-side container listening on the sidecar port. */
+  findContainer(port: number | undefined): Promise<string | null>
+  /** `docker stop <id>` — the only thing that actually stops the container. */
+  dockerStop(container: string): boolean
+}
+
+export interface StopSidecarOutcome {
+  stopped: boolean
+  detail: string
+}
+
+/**
+ * Stop decision with injectable effects (unit-tested). The container
+ * OUTLIVES the docker CLI: killing the CLI alone leaves the daemon-side
+ * container running — still listening on the port and still capturing into
+ * the workspace while stop reports success. So the docker-stop path runs
+ * whenever a container can be found, INDEPENDENT of whether the CLI kill
+ * succeeded (regression: the old `stopped = true` after a successful kill
+ * short-circuited past docker stop and leaked a ghost sidecar).
+ * Pure over injected effects — unit-tested.
+ */
+export async function stopSidecarWith(
+  state: { pid?: number; container?: string; port?: number },
+  eff: StopSidecarEffects,
+): Promise<StopSidecarOutcome> {
+  let cliKilled = false
+  if (state.pid !== undefined) cliKilled = await eff.killCli(state.pid)
+  const container = state.container ?? (await eff.findContainer(state.port))
+  const containerStopped = container ? eff.dockerStop(container) : false
+  if (containerStopped) return { stopped: true, detail: `container ${container} stopped` }
+  // No container found (already gone) + CLI killed → nothing left running.
+  if (cliKilled && !container) return { stopped: true, detail: 'cli killed; no container found on the port' }
+  return {
+    stopped: false,
+    detail: `pid ${state.pid ?? 'unknown'}${container ? `, container ${container} (docker stop failed)` : ', no container found'}`,
+  }
+}
+
 async function sidecarState(config: ConfigType): Promise<{ running: boolean; pid?: number; port?: number; container?: string; nonce?: string }> {  const file = join(proxyDir(config), 'sidecar.json')
   if (!existsSync(file)) return { running: false }
   try {
@@ -287,17 +329,28 @@ export function registerProxy(ctx: Context, config: ConfigType) {
           // (same fetch path and output format as strix_http).
           const parsed = parseRawRequest(rawReq)
           if (!parsed.url) return `REJECTED: flow ${id} has no replayable URL (CONNECT metadata only — HTTPS without the sidecar CA).`
+          // Old captures (pre absolute-form .req files) lost the scheme: a
+          // Host-form request line parses back as http:// even for HTTPS
+          // flows, which would replay credentials in cleartext. The
+          // flows.jsonl summary kept the true URL — upgrade when the parsed
+          // URL matches it except for the scheme.
+          let replayUrl = parsed.url
+          const meta = readFlows(config).find((f) => f.id === id)
+          if (meta?.url?.startsWith('https://') && replayUrl.startsWith('http://')
+            && `https://${replayUrl.slice('http://'.length)}` === meta.url) {
+            replayUrl = meta.url
+          }
           // A replay IS a new request: the spray-guard runs inside
           // evaluatePostPolicy (verb check included), so the proxy cannot be
           // used to bypass counting, audit stamps, or the cap.
           let replayNote = ''
           {
-            const verdict = evaluatePostPolicy(config, parsed.url, parsed.body ?? '', parsed.method.toUpperCase())
+            const verdict = evaluatePostPolicy(config, replayUrl, parsed.body ?? '', parsed.method.toUpperCase())
             if (!verdict.proceed) return verdict.rejection
             replayNote = verdict.note
           }
           const sent = await sendHttpRequest(config, {
-            url: parsed.url,
+            url: replayUrl,
             method: parsed.method,
             headers: parsed.headers,
             body: parsed.body,
@@ -308,37 +361,33 @@ export function registerProxy(ctx: Context, config: ConfigType) {
         if (args.action === 'stop') {
           const state = await sidecarState(config)
           if (!state.running) return 'Sidecar not running.'
-          // Kill path 1: our own spawned child (same-process start) — but ONLY
-          // when the OS confirms the pid still belongs to a docker CLI.
-          // sidecar.json lives in the model-writable workspace, so a forged
-          // pid must never reach process.kill (it would SIGKILL an arbitrary
-          // host process, including dsh itself). Unverified pids fall through
-          // to the docker-stop path below.
-          let stopped = false
-          if (state.pid !== undefined && (await pidOwnedByDockerCli(state.pid))) {
-            try {
-              process.kill(state.pid, 'SIGKILL')
-              stopped = true
-            } catch {
-              stopped = false
-            }
-          }
-          // Kill path 2: docker stop by container id (cross-process: the
-          // container outlives the headless/one-shot process that started it).
-          if (!stopped) {
-            const container = state.container ?? (state.port !== undefined ? await dockerContainerForPort(state.port, proxyImageKey(config)) : null)
-            if (container) {
-              const { spawnSync } = await import('node:child_process')
+          const { spawnSync } = await import('node:child_process')
+          const outcome = await stopSidecarWith(state, {
+            // sidecar.json lives in the model-writable workspace, so a forged
+            // pid must never reach process.kill (it would SIGKILL an
+            // arbitrary host process, including dsh itself). Only kill when
+            // the OS confirms the pid still belongs to a docker CLI.
+            killCli: async (pid) => {
+              if (!(await pidOwnedByDockerCli(pid))) return false
+              try {
+                process.kill(pid, 'SIGKILL')
+                return true
+              } catch {
+                return false
+              }
+            },
+            findContainer: (port) => (port === undefined ? Promise.resolve(null) : dockerContainerForPort(port, proxyImageKey(config))),
+            dockerStop: (container) => {
               try {
                 const out = spawnSync('docker', ['stop', container], { encoding: 'utf8', timeout: 30_000 })
-                stopped = out.status === 0
+                return out.status === 0
               } catch {
-                stopped = false
+                return false
               }
-            }
-          }
-          if (!stopped) {
-            return `Could not stop the sidecar (pid ${state.pid ?? 'unknown'}${state.container ? `, container ${state.container}` : ''}). Kill it manually: docker stop <id> (docker ps | grep mitmproxy).`
+            },
+          })
+          if (!outcome.stopped) {
+            return `Could not stop the sidecar (${outcome.detail}). Kill it manually: docker stop <id> (docker ps | grep mitmproxy).`
           }
           try {
             const { rmSync } = await import('node:fs')
