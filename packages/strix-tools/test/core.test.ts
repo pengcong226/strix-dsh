@@ -976,6 +976,27 @@ describe('background shell producer', () => {
 describe('session mirror', () => {
   const fakeExec = (agent?: unknown) => ({ agent } as never)
 
+  // Since 0.12.5 mirrorEvent is a deliberate no-op: appending custom event
+  // types (strix/coverage, strix/note) without the ignorable marker makes
+  // sessions unloadable under the dsh format-migration chain (the desktop
+  // "history failed to load: gateway/internal" incident). These tests pin
+  // the no-op contract: whatever the runtime shape, nothing is ever written.
+
+  it('never appends, even with a live session available', () => {
+    const calls: Array<{ type: string; data: unknown }> = []
+    const exec = fakeExec({
+      id: 'x',
+      session: {
+        append: (type: string, data: unknown) => {
+          calls.push({ type, data })
+        },
+      },
+    })
+    expect(() => mirrorEvent(exec, 'strix/coverage', { action: 'record' })).not.toThrow()
+    expect(() => mirrorEvent(exec, 'strix/note', { action: 'create', note: { id: 'N-001' } })).not.toThrow()
+    expect(calls).toHaveLength(0)
+  })
+
   it('does nothing when there is no agent', () => {
     expect(() => mirrorEvent(fakeExec(undefined), 'strix/coverage', { action: 'record' })).not.toThrow()
   })
@@ -994,21 +1015,6 @@ describe('session mirror', () => {
       },
     })
     expect(() => mirrorEvent(exec, 'strix/coverage', { action: 'record' })).not.toThrow()
-  })
-
-  it('forwards type and data to a live session', () => {
-    const calls: Array<{ type: string; data: unknown }> = []
-    const exec = fakeExec({
-      id: 'x',
-      session: {
-        append: (type: string, data: unknown) => {
-          calls.push({ type, data })
-        },
-      },
-    })
-    mirrorEvent(exec, 'strix/note', { action: 'create', note: { id: 'N-001' } })
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.type).toBe('strix/note')
   })
 })
 
