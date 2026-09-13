@@ -288,7 +288,7 @@ export interface SendHttpOptions {
 export async function sendHttpRequest(
   config: ConfigType,
   opts: SendHttpOptions,
-): Promise<{ text: string; ok: boolean; status: number; rawBody: string; finalUrl: string }> {
+): Promise<{ text: string; ok: boolean; status: number; rawBody: string; finalUrl: string; byteCapped: boolean }> {
   const url = opts.url
   const method = (opts.method ?? 'GET').toUpperCase()
   const headers: Record<string, string> = { ...(opts.headers ?? {}) }
@@ -313,10 +313,10 @@ export async function sendHttpRequest(
     const reason = err instanceof Error ? err.message : String(err)
     if (reason.includes('abort')) {
       const text = `Request failed: timeout after ${timeoutMs}ms (aborted). The host may be filtered, down, or the port/scheme wrong — fix the target rather than retrying blindly.`
-      return { text, ok: false, status: 0, rawBody: '', finalUrl: url }
+      return { text, ok: false, status: 0, rawBody: '', finalUrl: url, byteCapped: false }
     }
     const text = `Request failed: ${reason}. Check DNS, scheme (http/https), and port; a refused connection means nothing is listening — treat as unreachable, not as a finding.`
-    return { text, ok: false, status: 0, rawBody: '', finalUrl: url }
+    return { text, ok: false, status: 0, rawBody: '', finalUrl: url, byteCapped: false }
   }
 
   const responseHeaders: Record<string, string> = {}
@@ -360,10 +360,10 @@ export async function sendHttpRequest(
     const reason = err instanceof Error ? err.message : String(err)
     if (reason.includes('abort')) {
       const text = `Request failed: timeout after ${timeoutMs}ms while receiving the body (aborted). Headers arrived (HTTP ${response.status}); the body stream stalled — treat as an unreliable target, do not retry blindly.`
-      return { text, ok: false, status: 0, rawBody: '', finalUrl: url }
+      return { text, ok: false, status: 0, rawBody: '', finalUrl: url, byteCapped: false }
     }
     const text = `Request failed while receiving the body: ${reason}. Partial transfer — treat as an unreliable target, not as a finding.`
-    return { text, ok: false, status: 0, rawBody: '', finalUrl: url }
+    return { text, ok: false, status: 0, rawBody: '', finalUrl: url, byteCapped: false }
   } finally {
     clearTimeout(timer)
   }
@@ -393,7 +393,7 @@ export async function sendHttpRequest(
   ]
     .filter(Boolean)
     .join('\n')
-  return { text, ok: true, status: response.status, rawBody, finalUrl: response.url }
+  return { text, ok: true, status: response.status, rawBody, finalUrl: response.url, byteCapped }
 }
 
 export function registerHttp(ctx: Context, config: ConfigType) {
@@ -421,8 +421,9 @@ export function registerHttp(ctx: Context, config: ConfigType) {
         timeout_ms: { type: 'number', description: 'Request timeout in milliseconds. Default from plugin config.' },
         save_to: {
           type: 'string',
-          description: 'Save the full response body to workspace/responses/<save_to> (relative path). '
-            + 'The tool output stays truncated; use this for large bodies.',
+          description: 'Save the received response body to workspace/responses/<save_to> (relative path). '
+          + 'The tool output stays truncated; use this for large bodies. The saved copy is bounded by '
+          + 'httpMaxBodyBytes (reception is cut there) — raise that config if you need more than the cap.',
         },
       },
       output: {
@@ -463,7 +464,13 @@ export function registerHttp(ctx: Context, config: ConfigType) {
         const { mkdirSync } = await import('node:fs')
         mkdirSync(dirname(target), { recursive: true })
         writeFileSync(target, sent.rawBody, 'utf8')
-        return `${sent.text}${postNote}\n[full body saved to ${target}]`
+        // The saved copy is the RECEIVED copy: when reception was cut at
+        // httpMaxBodyBytes the file is bounded too — say so, or the model
+        // believes it archived the full body for evidence.
+        const capNote = sent.byteCapped
+          ? `\n[saved copy is bounded by httpMaxBodyBytes (${config.httpMaxBodyBytes} bytes) — reception was cut at the cap; raise it if you need the full body]`
+          : ''
+        return `${sent.text}${postNote}\n[body saved to ${target}]${capNote}`
       },
     }),
   )

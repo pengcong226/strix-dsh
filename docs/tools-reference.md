@@ -57,7 +57,7 @@ saved responses: 0
 | `raw_request` | string | 否 | **完整原始 HTTP 请求文本**（请求行+头+空行+体）。给出时覆盖以上全部结构化字段 |
 | `follow_redirects` | boolean | 否 | 默认 true；false 时 3xx 原样返回 |
 | `timeout_ms` | number | 否 | 默认取配置 `httpTimeoutMs`（30s） |
-| `save_to` | string | 否 | 完整响应体保存到 `workspace/responses/<save_to>`（输出仍截断；必须是 responses 内的相对路径，`..`/绝对路径拒绝落盘但不影响请求本身） |
+| `save_to` | string | 否 | 响应体保存到 `workspace/responses/<save_to>`（输出仍截断；必须是 responses 内的相对路径，`..`/绝对路径拒绝落盘但不影响请求本身）。**保存副本受 `httpMaxBodyBytes` 上限约束**——接收在该上限处被切断时，输出会注明；需要更大 body 先调高该配置 |
 
 **输出格式**：状态行（含耗时与最终 URL，重定向后）→ 全部响应头 → 截断标注（如触发）→ 空行 → 正文。
 
@@ -437,7 +437,7 @@ Sidecar stopped. 2 flow(s) remain queryable (list/get/replay).
 | `action` | check / kev-refresh / status |
 | `packages` | check：`[{ecosystem, name, version}]`（ecosystem 如 npm/PyPI/Go/Maven；单次至多 50 个） |
 
-**链路**：OSV `querybatch` 主查（包+版本 → 漏洞 id）→ `vulns/{id}` 明细（summary/CVSS_V3/fixed 版本/CVE 别名）→ KEV 缓存命中（`workspace/vulndb/kev.json`，24h TTL，缺失/过期自动刷）→ EPSS 逐 CVE 取分 → KEV 命中优先、EPSS 降序输出。结果直喂 `strix_finding create vulnerability_type=dependency_cve`（`dedupe-check` 按 CVE+包名排重）。**先证可达再登记**：有洞依赖只是 lead。**预算门**：`check` 是重型 fan-out（1+N+M 个网络请求），与其他重型工具同式查账（warn 前缀/block 拒止）。
+**链路**：OSV `querybatch` 主查（包+版本 → 漏洞 id）→ `vulns/{id}` 明细（summary/CVSS_V3/fixed 版本/CVE 别名）→ KEV 缓存命中（`workspace/vulndb/kev.json`，24h TTL，缺失/过期自动刷）→ EPSS 逐 CVE 取分 → KEV 命中优先、EPSS 降序输出。明细+EPSS 补全走 **6 泳道有界并发池**，整体受 `depcheckTimeoutMs`（默认 120s）预算约束：预算耗尽后领取的行诚实降级为 vuln-id-only 并在输出注明（重跑单包可补全），工具调用不再可能被大批次无限拖住。结果直喂 `strix_finding create vulnerability_type=dependency_cve`（`dedupe-check` 按 CVE+包名排重）。**先证可达再登记**：有洞依赖只是 lead。**预算门**：`check` 是重型 fan-out（1+N+M 个网络请求），与其他重型工具同式查账（warn 前缀/block 拒止）。
 
 **真实输出**（headless，lodash@4.17.20）：
 
@@ -490,6 +490,7 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | `reconTimeoutMs` / `nucleiRateLimit` | 300s / 50 | strix_recon / strix_sast |
 | `sastNucleiImage` / `sastSemgrepImage` / `sastNetwork` | projectdiscovery/nuclei:latest / returntocorp/semgrep:latest / true | strix_sast 容器镜像与网络 |
 | `sastExtraMountRoots` | `[]` | strix_sast：工作区之外允许 semgrep 扫描的宿主根目录 |
+| `depcheckTimeoutMs` | `120000` | strix_depcheck：单次 check 的补全 fan-out（OSV 明细+EPSS，6 泳道并发）总预算；预算耗尽后新领取的行降级为 vuln-id-only 并在输出注明 |
 | `proxyImage` | mitmproxy/mitmproxy:latest | strix_proxy 侧车镜像 |
 | `browserHeadless` | true | strix_browser |
 | `browserEnforcePostPolicy` | true | strix_browser 写操作自动 spray-guard（与 strix_http 同政策） |

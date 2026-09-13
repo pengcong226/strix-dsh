@@ -74,13 +74,25 @@ export function formatFlow(f: FlowSummary): string {
   return `${f.id} ${f.method} ${f.status} ${f.url} (req ${f.req_bytes}B / rsp ${f.rsp_bytes}B)`
 }
 
+/**
+ * Does one `docker ps --format '{{.ID}} {{.Ports}} {{.Image}}'` line describe
+ * a container of `imageKey` publishing `port`? Publish rows come in two
+ * spellings — `0.0.0.0:PORT->` and IPv6 `[::]:PORT->` (a dual-stack daemon
+ * prints both, an IPv6-only one prints only the bracket form) — and the
+ * previous matcher recognized only the first. Pure — unit-tested.
+ */
+export function dockerPsLineMatchesPort(line: string, port: number, imageKey: string): boolean {
+  if (!line.includes(imageKey)) return false
+  return line.includes(`0.0.0.0:${port}->`) || line.includes(`[::]:${port}->`)
+}
+
 async function dockerContainerForPort(port: number, imageKey: string): Promise<string | null> {
   const { spawnSync } = await import('node:child_process')
   try {
     const out = spawnSync('docker', ['ps', '--format', '{{.ID}} {{.Ports}} {{.Image}}'], { encoding: 'utf8', timeout: 15_000 })
     if (out.status !== 0) return null
     for (const line of (out.stdout ?? '').split('\n')) {
-      if (line.includes(`0.0.0.0:${port}->`) && line.includes(imageKey)) {
+      if (dockerPsLineMatchesPort(line, port, imageKey)) {
         return line.split(/\s+/)[0] ?? null
       }
     }
@@ -141,8 +153,11 @@ async function sidecarState(config: ConfigType): Promise<{ running: boolean; pid
   if (!existsSync(file)) return { running: false }
   try {
     const state = JSON.parse(readFileSync(file, 'utf8')) as { pid: number; port: number; nonce?: string }
-    // Liveness 1: the marker records the docker child pid we spawned. Only
-    // valid inside the process that spawned it — headless exits invalidate it.
+    // Liveness 1: the marker's pid is alive AND still a docker CLI. A bare
+    // kill(pid, 0) trusts the recorded pid blindly — on pid reuse (recycled
+    // aggressively on Windows) a long-dead sidecar reports "running" forever.
+    // Ownership verification is best-effort; any failure falls through to
+    // the docker ps check instead of deciding on its own.
     let alive = false
     try {
       process.kill(state.pid, 0)
@@ -150,8 +165,11 @@ async function sidecarState(config: ConfigType): Promise<{ running: boolean; pid
     } catch {
       alive = false
     }
-    if (alive) return { running: true, pid: state.pid, port: state.port, nonce: state.nonce }
-    // Liveness 2: fall back to docker ps — the container outlives us.
+    if (alive && (await pidOwnedByDockerCli(state.pid))) {
+      return { running: true, pid: state.pid, port: state.port, nonce: state.nonce }
+    }
+    // Liveness 2: fall back to docker ps — the container outlives us, and a
+    // stale/reused pid must never mask the real question (is the container up).
     const container = await dockerContainerForPort(state.port, proxyImageKey(config))
     if (container) return { running: true, pid: state.pid, port: state.port, container, nonce: state.nonce }
     return { running: false }

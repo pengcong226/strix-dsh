@@ -45,4 +45,5 @@
           # Headless registers no codex/claude providers and no bare "goal"
           # tool (only create_goal/get_goal/update_goal), so only names that
           # actually exist here may be listed, otherwise dispatch throws.
-          deny: [subagent, subagent_fork, strix_operator, workflow, ralph, create_goal, get_goal, update_goal]
+          # present (session deliverables) stays orchestrator-only.
+          deny: [subagent, subagent_fork, strix_operator, workflow, ralph, create_goal, get_goal, update_goal, present]

@@ -11,7 +11,10 @@
  *
  * All three sources are keyless. KEV (~1MB, 1694 entries) is cached at
  * workspace/vulndb/kev.json with a 24h TTL (action=kev-refresh forces a
- * refetch); OSV/EPSS are queried live per call (small payloads).
+ * refetch); OSV/EPSS are queried live per call (small payloads). Enrichment
+ * (detail + EPSS) runs through a 6-lane pool under one depcheckTimeoutMs
+ * deadline (default 120s): rows claimed after the deadline degrade to
+ * vuln-id-only instead of blocking the tool call unbounded.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -27,6 +30,8 @@ const KEV_URL = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_
 const EPSS_URL = 'https://api.first.org/data/v1/epss'
 const KEV_TTL_MS = 24 * 3600 * 1000
 const FETCH_TIMEOUT_MS = 20_000
+/** Concurrent detail/EPSS fetches inside one check (each still 20s-capped). */
+const ENRICH_CONCURRENCY = 6
 
 export interface DepPackage {
   ecosystem: string
@@ -145,6 +150,36 @@ export function sortDepFindings(rows: DepFinding[]): DepFinding[] {
   })
 }
 
+/**
+ * Run async work items through a fixed-size worker pool. Pure scheduler —
+ * unit-tested with fake items; `runItem` rejections settle the item as null
+ * instead of rejecting the whole batch (enrichment is best-effort).
+ */
+export async function runPool<T>(
+  items: readonly T[],
+  concurrency: number,
+  runItem: (item: T) => Promise<unknown>,
+): Promise<Array<{ item: T; ok: boolean }>> {
+  const outcomes: Array<{ item: T; ok: boolean }> = new Array(items.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next
+      if (i >= items.length) return
+      next += 1
+      try {
+        await runItem(items[i]!)
+        outcomes[i] = { item: items[i]!, ok: true }
+      } catch {
+        outcomes[i] = { item: items[i]!, ok: false }
+      }
+    }
+  }
+  const lanes = Math.max(1, Math.min(concurrency, items.length))
+  await Promise.all(Array.from({ length: lanes }, () => worker()))
+  return outcomes
+}
+
 export function formatDepFinding(f: DepFinding): string {
   const tags = [
     f.kev_hit ? 'KEV-HIT' : null,
@@ -250,52 +285,81 @@ export function registerDepcheck(ctx: Context, config: ConfigType) {
             }
           }
 
+          // Enrichment (OSV detail + EPSS per vuln) runs through a bounded
+          // pool under one overall deadline. The previous loop awaited each
+          // fetch serially with no ceiling: a 50-package check × several vulns
+          // each × 20s per-fetch timeout could park the tool call for many
+          // minutes — the only unbounded tool in the suite.
+          const deadline = Date.now() + config.depcheckTimeoutMs
+          const expired = (): boolean => Date.now() > deadline
           const rows: DepFinding[] = []
           const results = batch.results ?? []
+          const work: Array<() => void> = []
           for (let i = 0; i < pkgs.length; i++) {
             const pkg = pkgs[i]!
             const vulns = results[i]?.vulns ?? []
             for (const v of vulns) {
-              let detail: Record<string, unknown> = {}
-              try {
-                detail = (await fetchJson(`${OSV_VULN}${encodeURIComponent(v.id)}`)) as Record<string, unknown>
-              } catch {
-                detail = {}
-              }
+              work.push(() => {
+                // Deadline check at claim time: an item claimed after the
+                // budget is gone degrades to vuln-id-only (still listed, no
+                // detail/EPSS) instead of silently vanishing.
+                if (expired()) return
+                rows.push({
+                  package: pkg.name,
+                  ecosystem: pkg.ecosystem,
+                  version: pkg.version,
+                  vuln_id: v.id,
+                  cve: null,
+                  summary: v.id,
+                  severity: null,
+                  kev_hit: false,
+                  epss: null,
+                  fixed_in: [],
+                })
+              })
+            }
+          }
+          // Phase 1 (bounded pool): fetch OSV detail + EPSS for each vuln,
+          // mutating the row in place. Items claimed after the deadline
+          // degrade to vuln-id-only rows via the expired() check above.
+          await runPool(work, ENRICH_CONCURRENCY, async (claim) => {
+            claim()
+            const row = rows[rows.length - 1]
+            if (!row || row.vuln_id === undefined) return
+            try {
+              const detail = (await fetchJson(`${OSV_VULN}${encodeURIComponent(row.vuln_id)}`)) as Record<string, unknown>
               const parsed = parseOsvVuln(detail)
-              let epss: number | null = null
-              if (parsed.cve) {
+              row.cve = parsed.cve
+              row.summary = parsed.summary || row.vuln_id
+              row.severity = parsed.severity
+              row.fixed_in = parsed.fixed_in
+              row.kev_hit = parsed.cve ? kev.has(parsed.cve.toUpperCase()) : false
+              if (parsed.cve && !expired()) {
                 try {
                   const ej = (await fetchJson(`${EPSS_URL}?cve=${encodeURIComponent(parsed.cve)}`)) as {
                     data?: Array<{ epss?: string }>
                   }
                   const score = parseFloat(ej.data?.[0]?.epss ?? '')
-                  epss = Number.isFinite(score) ? score : null
+                  row.epss = Number.isFinite(score) ? score : null
                 } catch {
-                  epss = null
+                  row.epss = null
                 }
               }
-              rows.push({
-                package: pkg.name,
-                ecosystem: pkg.ecosystem,
-                version: pkg.version,
-                vuln_id: v.id,
-                cve: parsed.cve,
-                summary: parsed.summary || v.id,
-                severity: parsed.severity,
-                kev_hit: parsed.cve ? kev.has(parsed.cve.toUpperCase()) : false,
-                epss,
-                fixed_in: parsed.fixed_in,
-              })
+            } catch {
+              /* detail unavailable: the row keeps vuln-id-only shape */
             }
-          }
+          })
 
           if (rows.length === 0) {
             return `${warnPrefix}${pkgs.length} package(s) checked against OSV: no known vulns. (Absence here is not proof of safety — unindexed or brand-new flaws miss every DB.)`
           }
           const sorted = sortDepFindings(rows)
+          const degraded = rows.filter((r) => r.summary === r.vuln_id && r.severity === null).length
+          const degradeNote = degraded > 0
+            ? `\n[enrichment budget: ${degraded} row(s) listed as vuln-id only — the ${Math.round(config.depcheckTimeoutMs / 1000)}s depcheckTimeoutMs budget ran out or OSV detail was unavailable; re-run check on the specific package for full detail]`
+            : ''
           return [
-            `${warnPrefix}${sorted.length} known vuln(s) in ${pkgs.length} package(s) (KEV-hit first, then EPSS):`,
+            `${warnPrefix}${sorted.length} known vuln(s) in ${pkgs.length} package(s) (KEV-hit first, then EPSS):${degradeNote}`,
             ...sorted.map(formatDepFinding),
             'Next: prove reachability before filing — a vulnerable dependency is a lead. File confirmed ones with strix_finding create vulnerability_type=dependency_cve (dedupe-check keys on CVE + package).',
           ].join('\n')

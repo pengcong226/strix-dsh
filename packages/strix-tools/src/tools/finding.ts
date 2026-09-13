@@ -550,7 +550,9 @@ export function registerReport(ctx: Context, config: ConfigType) {
               + 'Amend report.md directly if the close needs changes — finish appends exactly once.'
           }
           writeFileSync(reportPath, `${previous}\n${closing}`, 'utf8')
-          return `Engagement closed: four executive sections appended to ${reportPath} (${findings.length} findings).`
+          const presentHint = ' Present report.md (and findings.sarif when generated) with the present tool '
+            + 'so the operator receives durable file references.'
+          return `Engagement closed: four executive sections appended to ${reportPath} (${findings.length} findings).${presentHint}`
         }
         if (args.action !== undefined && args.action !== 'report') {
           return `Unknown action "${args.action}". Use report | sarif | finish.`

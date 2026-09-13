@@ -69,6 +69,13 @@ export interface ConfigType {
    * exfiltration-relevant path).
    */
   sastExtraMountRoots: string[]
+  /**
+   * strix_depcheck: overall deadline in milliseconds for one check's
+   * enrichment fan-out (OSV detail + EPSS per vuln, 6-lane pool). Rows
+   * claimed after the deadline degrade to vuln-id-only — the tool call
+   * itself can no longer be parked unbounded by a large batch.
+   */
+  depcheckTimeoutMs: number
   /** strix_proxy: sidecar container image for traffic interception. */
   proxyImage: string
   /** strix_browser: run Chromium headless. */
@@ -141,6 +148,7 @@ export const Config = z
     sastSemgrepImage: z.string().default('returntocorp/semgrep:latest'),
     sastNetwork: z.boolean().default(true),
     sastExtraMountRoots: z.array(z.string()).default([]),
+    depcheckTimeoutMs: z.number().min(1).default(120_000),
     proxyImage: z.string().default('mitmproxy/mitmproxy:latest'),
     browserHeadless: z.boolean().default(true),
     browserEnforcePostPolicy: z.boolean().default(true),

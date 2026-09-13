@@ -57,7 +57,7 @@ saved responses: 0
 | `raw_request` | string | no | **Complete raw HTTP request text** (request line + headers + blank line + body). Overrides all structured fields above when given |
 | `follow_redirects` | boolean | no | Default true; false returns 3xx as-is |
 | `timeout_ms` | number | no | Defaults to config `httpTimeoutMs` (30s) |
-| `save_to` | string | no | Full response body saved to `workspace/responses/<save_to>` (output stays truncated; must be a relative path inside responses — `..`/absolute paths refuse the write but not the request) |
+| `save_to` | string | no | Response body saved to `workspace/responses/<save_to>` (output stays truncated; must be a relative path inside responses — `..`/absolute paths refuse the write but not the request). **The saved copy is bounded by `httpMaxBodyBytes`** — when reception was cut at the cap the output says so; raise that config first if you need a larger body |
 
 **Output format**: status line (with duration and final URL, post-redirect) → all response headers → truncation marker (if triggered) → blank line → body.
 
@@ -435,7 +435,7 @@ Sidecar stopped. 2 flow(s) remain queryable (list/get/replay).
 | `action` | check / kev-refresh / status |
 | `packages` | check: `[{ecosystem, name, version}]` (ecosystem e.g. npm/PyPI/Go/Maven; max 50 per call) |
 
-**Chain**: OSV `querybatch` primary (package+version → vuln ids) → `vulns/{id}` detail (summary/CVSS_V3/fixed versions/CVE aliases) → KEV cache hit (`workspace/vulndb/kev.json`, 24h TTL, auto-refreshed when missing/stale) → per-CVE EPSS scores → KEV hits first, EPSS desc. Results feed `strix_finding create vulnerability_type=dependency_cve` directly (`dedupe-check` keys on CVE + package). **Prove reachability before filing**: a vulnerable dependency is a lead. **Budget gate**: `check` fans out to 1+N+M network calls, so it consults the ledger like the other heavy tools (warn/block).
+**Chain**: OSV `querybatch` primary (package+version → vuln ids) → `vulns/{id}` detail (summary/CVSS_V3/fixed versions/CVE aliases) → KEV cache hit (`workspace/vulndb/kev.json`, 24h TTL, auto-refreshed when missing/stale) → per-CVE EPSS scores → KEV hits first, EPSS desc. Detail+EPSS enrichment runs through a **6-lane bounded pool** under one overall `depcheckTimeoutMs` deadline (default 120s): rows claimed after the deadline degrade honestly to vuln-id-only with an output note (re-run the single package for full detail) — the tool call can no longer be parked unbounded by a large batch. Results feed `strix_finding create vulnerability_type=dependency_cve` directly (`dedupe-check` keys on CVE + package). **Prove reachability before filing**: a vulnerable dependency is a lead. **Budget gate**: `check` fans out to 1+N+M network calls, so it consults the ledger like the other heavy tools (warn/block).
 
 **Real output** (headless, lodash@4.17.20):
 
@@ -488,6 +488,7 @@ BUDGET EXCEEDED: strix_recon refused — spent $0.0175 of $0.0001 cap (50000 in 
 | `reconTimeoutMs` / `nucleiRateLimit` | 300s / 50 | strix_recon / strix_sast |
 | `sastNucleiImage` / `sastSemgrepImage` / `sastNetwork` | projectdiscovery/nuclei:latest / returntocorp/semgrep:latest / true | strix_sast container images and networking |
 | `sastExtraMountRoots` | `[]` | strix_sast: host roots outside the workspace that semgrep may scan |
+| `depcheckTimeoutMs` | `120000` | strix_depcheck: overall deadline for one check's enrichment fan-out (OSV detail + EPSS, 6-lane pool); rows claimed after the deadline degrade to vuln-id-only with an output note |
 | `proxyImage` | mitmproxy/mitmproxy:latest | strix_proxy sidecar image |
 | `browserHeadless` | true | strix_browser |
 | `browserEnforcePostPolicy` | true | strix_browser automated spray-guard over browser-fired writes |

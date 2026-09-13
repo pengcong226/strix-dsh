@@ -15,7 +15,7 @@ import { registerNotes } from '../src/tools/notes.js'
 import { checkExtraArgs, SEMGREP_BLOCKED_EXTRA_FLAGS, semgrepTargetAllowed } from '../src/tools/sast.js'
 import { createApprovalGate, matchesAutoAllow, splitApprovalSummary } from '../src/lib/approval.js'
 import { methodologySection } from '../src/index.js'
-import { formatDepFinding, parseOsvVuln, readKevCache, sortDepFindings } from '../src/tools/depcheck.js'
+import { formatDepFinding, parseOsvVuln, readKevCache, runPool, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_METHODS, normalizePathKey } from '../src/tools/http.js'
 import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, listFindings, missingFinishSections, registerFinding, registerReport, validateFinding } from '../src/tools/finding.js'
 import { OUTCOMES, readLedger, registerCoverage, writeLedger } from '../src/tools/coverage.js'
@@ -28,7 +28,7 @@ import { buildBackgroundDockerArgs, jobLabel } from '../src/lib/jobs.js'
 import { registerThreatModel } from '../src/tools/threat-model.js'
 import { createSprayGuardHandler, registerBrowser, type GuardedRoute } from '../src/tools/browser.js'
 import { mirrorEvent } from '../src/lib/session-mirror.js'
-import { filterFlows, formatFlow, pidOwnedByDockerCli, procCmdlineIsDockerCli, proxyImageKey, readFlows, stopSidecarWith, tasklistRowIsDockerCli } from '../src/tools/proxy.js'
+import { filterFlows, formatFlow, dockerPsLineMatchesPort, pidOwnedByDockerCli, procCmdlineIsDockerCli, proxyImageKey, readFlows, stopSidecarWith, tasklistRowIsDockerCli } from '../src/tools/proxy.js'
 import { registerShell } from '../src/tools/shell.js'
 import { buildHttpxArgs, isSafeDomain } from '../src/tools/recon.js'
 import {
@@ -66,6 +66,7 @@ function scratchConfig(): ConfigType {
     sastSemgrepImage: 'returntocorp/semgrep:latest',
     sastNetwork: true,
     sastExtraMountRoots: [],
+    depcheckTimeoutMs: 5_000,
     proxyImage: 'mitmproxy/mitmproxy:latest',
     browserHeadless: true,
     browserEnforcePostPolicy: true,
@@ -490,6 +491,35 @@ describe('depcheck pure helpers', () => {
     expect(line).toContain('lodash@4.17.20')
     expect(line).toContain('KEV-HIT')
     expect(line).toContain('fixed=4.17.21')
+  })
+
+  it('runPool runs every item once and settles rejections as not-ok', async () => {
+    const ran: number[] = []
+    const outcomes = await runPool([1, 2, 3, 4, 5, 6, 7], 3, async (n) => {
+      ran.push(n)
+      if (n === 4) throw new Error('boom')
+    })
+    expect(ran.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7])
+    expect(outcomes.filter((o) => o.ok)).toHaveLength(6)
+    expect(outcomes.find((o) => o.item === 4)?.ok).toBe(false)
+  })
+
+  it('runPool caps concurrency at the lane count', async () => {
+    let inFlight = 0
+    let peak = 0
+    await runPool(Array.from({ length: 12 }, (_, i) => i), 4, async () => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setTimeout(r, 15))
+      inFlight -= 1
+    })
+    expect(peak).toBeLessThanOrEqual(4)
+    expect(peak).toBeGreaterThan(1)
+  })
+
+  it('runPool handles an empty item list without starting lanes', async () => {
+    const outcomes = await runPool([] as number[], 4, async () => { throw new Error('must not run') })
+    expect(outcomes).toEqual([])
   })
 })
 
@@ -1067,6 +1097,18 @@ describe('proxy flow queries', () => {
     expect(procCmdlineIsDockerCli('/usr/bin/docker\0run\0')).toBe(true)
     expect(procCmdlineIsDockerCli('node\0dsh\0')).toBe(false)
     expect(procCmdlineIsDockerCli('')).toBe(false)
+  })
+
+  it('matches docker ps publish rows on both 0.0.0.0 and [::] spellings', () => {
+    const image = 'mitmproxy/mitmproxy'
+    expect(dockerPsLineMatchesPort('abc123 0.0.0.0:8080->8080/tcp mitmproxy/mitmproxy:latest', 8080, image)).toBe(true)
+    expect(dockerPsLineMatchesPort('abc123 [::]:8080->8080/tcp mitmproxy/mitmproxy:latest', 8080, image)).toBe(true)
+    expect(dockerPsLineMatchesPort('abc123 0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp mitmproxy/mitmproxy', 8080, image)).toBe(true)
+    // Wrong port, wrong image, or a substring of another port must not match.
+    expect(dockerPsLineMatchesPort('abc123 0.0.0.0:8081->8080/tcp mitmproxy/mitmproxy:latest', 8080, image)).toBe(false)
+    expect(dockerPsLineMatchesPort('abc123 0.0.0.0:8080->8080/tcp nginx:latest', 8080, image)).toBe(false)
+    expect(dockerPsLineMatchesPort('abc123 0.0.0.0:18080->8080/tcp mitmproxy/mitmproxy:latest', 8080, image)).toBe(false)
+    expect(dockerPsLineMatchesPort('', 8080, image)).toBe(false)
   })
 
   it('pid ownership check fails closed on bad pids', async () => {
@@ -2189,6 +2231,29 @@ describe('sendHttpRequest byte cap', () => {
       expect(out.ok).toBe(true)
       expect(out.rawBody).toBe('complete-body')
       expect(out.text).not.toMatch(/body reception stopped/)
+      expect(out.byteCapped).toBe(false)
+    } finally {
+      server.close()
+      server.closeAllConnections?.()
+    }
+  })
+
+  it('reports byteCapped=true when reception was cut at the cap', async () => {
+    const http = await import('node:http')
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('y'.repeat(50_000))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const addr = server.address()
+    const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}/`
+    try {
+      const config = { ...scratchConfig(), httpMaxBodyBytes: 10_000, httpMaxBodyChars: 200_000 }
+      const out = await sendHttpRequest(config, { url })
+      expect(out.ok).toBe(true)
+      // The flag is what save_to's honest cap note keys on: a capped
+      // reception means the SAVED copy is bounded too.
+      expect(out.byteCapped).toBe(true)
     } finally {
       server.close()
       server.closeAllConnections?.()

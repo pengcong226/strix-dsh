@@ -161,15 +161,15 @@
         section: |
               You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
 
-              Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+              Explore first. Use non-mutating reads and workspace state to ground the plan in the actual engagement: strix_runs, strix_coverage list, strix_finding list, strix_notes list, threat-model get. Do not send attack traffic, run containers, or otherwise carry out testing while planning — plan it. Prefer prior coverage and existing tools over new machinery.
 
-              The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+              The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using execution tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
 
-              Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+              Resolve discoverable facts by inspection (workspace state, prior findings, coverage, notes). This composition deliberately ships NO user-question tool: the operator's input arrives as ordinary messages, and a plan must never wait on a question — state assumptions explicitly in the plan instead.
 
-              Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+              Make the plan decision-complete: state the engagement goal and success criteria; group testing phases (recon, validation, reporting); identify targets in scope, the authorization state, and any pre-approvals required; cover edge cases, failure modes (blocked paths and their second paths), and explicit assumptions. Keep it concise enough to review but detailed enough that an operator agent could execute it without re-deciding scope.
 
-              When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+              When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and execution begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with execution.
 
 # ── compaction ──────────────────────────────────────────────────────────────
 
@@ -243,7 +243,9 @@
     # name real registered tools only — codex/claude rows are disabled here,
     # and bare "goal" is a /goal slash-command, not a tool (the tools are
     # create_goal/get_goal/update_goal). strix_operator denies itself so the
-    # child is a true leaf and cannot re-delegate.
+    # child is a true leaf and cannot re-delegate. `present` (declaring
+    # session deliverables) stays orchestrator-only: the operator files
+    # findings; the parent presents report.md.
     - id: tool-strix-operator
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
@@ -303,7 +305,7 @@
 
           ONLY test targets you own or have explicit, written permission to test.
         toolFilter:
-          deny: [subagent, subagent_fork, strix_operator, workflow, ralph, create_goal, get_goal, update_goal]
+          deny: [subagent, subagent_fork, strix_operator, workflow, ralph, create_goal, get_goal, update_goal, present]
 
     # Fork omits model selection so provider/model stay equal to the parent and
     # the inherited history remains eligible for KV Cache reuse. This preset
@@ -373,3 +375,10 @@
   config:
     fetch: true
     searchTimeoutMs: 60000
+
+# Declare final deliverables (report.md, findings.sarif, key evidence files)
+# through the Session filesystem so the operator receives durable file
+# references instead of prose paths. Parity with upstream's standard preset;
+# strix_report finish reminds the model to present report.md.
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'
