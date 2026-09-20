@@ -76,6 +76,12 @@ export interface ConfigType {
    * itself can no longer be parked unbounded by a large batch.
    */
   depcheckTimeoutMs: number
+  /**
+   * strix_report finish: bounded wait in milliseconds for live strix-shell
+   * jobs to settle before the close kills the stragglers (phase-3
+   * convergence). The close itself never blocks longer than this.
+   */
+  finishJobWaitMs: number
   /** strix_proxy: sidecar container image for traffic interception. */
   proxyImage: string
   /** strix_browser: run Chromium headless. */
@@ -149,6 +155,7 @@ export const Config = z
     sastNetwork: z.boolean().default(true),
     sastExtraMountRoots: z.array(z.string()).default([]),
     depcheckTimeoutMs: z.number().min(1).default(120_000),
+    finishJobWaitMs: z.number().min(0).default(10_000),
     proxyImage: z.string().default('mitmproxy/mitmproxy:latest'),
     browserHeadless: z.boolean().default(true),
     browserEnforcePostPolicy: z.boolean().default(true),

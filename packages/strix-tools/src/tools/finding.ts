@@ -7,10 +7,11 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
-import { nextIdAmong, nextSequentialId, safeId, workspaceDir, workspaceSub, writeExclusive, writeFileAtomic } from '../lib/util.js'
+import { nextIdAmong, nextSequentialId, safeId, safeWorkspacePath, workspaceDir, workspaceSub, writeExclusive, writeFileAtomic } from '../lib/util.js'
 import { maskTestAccount, readAuthorization } from './authorization.js'
 import { readLedger } from './coverage.js'
 import { writeSarifReport } from './sarif.js'
@@ -28,6 +29,26 @@ export interface CodeLocation {
   fix_after: string
 }
 
+/**
+ * A structured, tamper-evident pointer from a finding to a workspace
+ * artifact (saved response, screenshot, pybox run dir, recon output).
+ * `sha256` and `registered_at` are computed/set by the PLUGIN at
+ * registration time — a model-claimed hash would attest nothing, so the
+ * model only ever supplies artifact/source/note.
+ */
+export interface EvidenceRef {
+  /** Workspace-relative artifact path, e.g. "responses/req-001.json". */
+  artifact: string
+  /** Which strix tool produced the artifact (strix_http, strix_browser, ...). */
+  source: string
+  /** ISO timestamp set by the plugin when the ref was registered. */
+  registered_at: string
+  /** sha256 of the artifact file at registration time. */
+  sha256: string
+  /** One-line claim this artifact supports. */
+  note?: string
+}
+
 export interface Finding {
   id: string
   title: string
@@ -37,6 +58,8 @@ export interface Finding {
   description: string
   /** Required: the concrete proof — request/response pairs, PoC output, screenshots paths. */
   evidence: string
+  /** Structured, hash-stamped pointers to workspace artifacts backing the evidence. */
+  evidence_refs?: EvidenceRef[]
   poc_script?: string
   cvss_vector?: string
   counterevidence?: string
@@ -226,7 +249,131 @@ export function validateFinding(args: Record<string, unknown>, strict: boolean):
   if (args.confidence && !CONFIDENCES.includes(args.confidence as (typeof CONFIDENCES)[number])) {
     return `REJECTED: confidence must be one of ${CONFIDENCES.join(', ')}`
   }
+  if (args.cvss_vector !== undefined) {
+    const cvssError = validateCvssVector(String(args.cvss_vector))
+    if (cvssError) return cvssError
+  }
   return null
+}
+
+/**
+ * CVSS v3.1 vector-string syntax check: "CVSS:3.1/" prefix, KEY:VALUE
+ * parts with known metric keys, single-letter values, and all eight base
+ * metrics present. Syntax only — the mapping of metrics to demonstrated
+ * PoC results stays a prompt discipline (the model must justify AV/AC/…
+ * from its evidence, not from a calculator). Pure — unit-tested.
+ */
+const CVSS31_KEYS = new Set([
+  'AV', 'AC', 'PR', 'UI', 'S', 'C', 'I', 'A',
+  'E', 'RL', 'RC', 'CR', 'IR', 'AR',
+  'MAV', 'MAC', 'MPR', 'MUI', 'MS', 'MC', 'MI', 'MA',
+])
+const CVSS31_BASE_REQUIRED = ['AV', 'AC', 'PR', 'UI', 'S', 'C', 'I', 'A']
+
+export function validateCvssVector(v: string): string | null {
+  const PREFIX = 'CVSS:3.1/'
+  if (!v.startsWith(PREFIX)) {
+    return `REJECTED: cvss_vector must be a CVSS v3.1 vector string starting with "${PREFIX}" (got "${v.slice(0, 40)}"). Omit the field if you cannot justify a vector.`
+  }
+  const parts = v.slice(PREFIX.length).split('/')
+  const seen = new Set<string>()
+  for (const part of parts) {
+    const i = part.indexOf(':')
+    if (i <= 0 || i === part.length - 1) {
+      return `REJECTED: cvss_vector part "${part}" is not KEY:VALUE.`
+    }
+    const key = part.slice(0, i)
+    const value = part.slice(i + 1)
+    if (!CVSS31_KEYS.has(key)) {
+      return `REJECTED: cvss_vector metric "${key}" is not a CVSS v3.1 metric key.`
+    }
+    if (!/^[A-Z]$/.test(value)) {
+      return `REJECTED: cvss_vector value "${value}" for ${key} is not a single uppercase letter.`
+    }
+    seen.add(key)
+  }
+  const missing = CVSS31_BASE_REQUIRED.filter((k) => !seen.has(k))
+  if (missing.length > 0) {
+    return `REJECTED: cvss_vector is missing base metric(s): ${missing.join(', ')}. A v3.1 vector must carry all eight.`
+  }
+  return null
+}
+
+/**
+ * Normalize model-supplied evidence_refs into EvidenceRef records: the
+ * artifact path must resolve INSIDE the workspace (safeWorkspacePath) and
+ * the file must EXIST — a ref to a missing file is a typo or a fabrication,
+ * and fails closed like every other finding guard. sha256 + registered_at
+ * are stamped here by the plugin, never taken from the caller. Returns the
+ * refs plus a rejection string when any entry is invalid (the whole
+ * create/update is refused — one bad ref must not slip into the ledger).
+ */
+export function normalizeEvidenceRefs(
+  config: ConfigType,
+  raw: unknown,
+): { refs: EvidenceRef[]; error: string | null } {
+  if (raw === undefined) return { refs: [], error: null }
+  if (!Array.isArray(raw)) {
+    return { refs: [], error: 'REJECTED: evidence_refs must be an array of {artifact, source, note?} objects.' }
+  }
+  const refs: EvidenceRef[] = []
+  for (const entry of raw) {
+    const e = entry as { artifact?: unknown; source?: unknown; note?: unknown }
+    const artifact = typeof e.artifact === 'string' ? e.artifact.trim() : ''
+    const source = typeof e.source === 'string' ? e.source.trim() : ''
+    if (!artifact || !source) {
+      return { refs: [], error: 'REJECTED: every evidence_ref needs a non-empty artifact path and a source tool name.' }
+    }
+    const resolved = safeWorkspacePath(workspaceDir(config), artifact)
+    if (!resolved) {
+      return { refs: [], error: `REJECTED: evidence_ref artifact "${artifact}" does not resolve inside the engagement workspace.` }
+    }
+    if (!existsSync(resolved)) {
+      return { refs: [], error: `REJECTED: evidence_ref artifact "${artifact}" does not exist in the workspace — capture the evidence first (e.g. strix_http save_to, strix_browser screenshot), then reference it.` }
+    }
+    let sha256: string
+    try {
+      sha256 = createHash('sha256').update(readFileSync(resolved)).digest('hex')
+    } catch (err) {
+      return { refs: [], error: `REJECTED: evidence_ref artifact "${artifact}" could not be read for hashing (${err instanceof Error ? err.message : String(err)}).` }
+    }
+    const note = typeof e.note === 'string' ? e.note.trim() : ''
+    refs.push({
+      artifact,
+      source,
+      registered_at: new Date().toISOString(),
+      sha256,
+      ...(note ? { note } : {}),
+    })
+  }
+  return { refs, error: null }
+}
+
+/**
+ * Recompute each ref's artifact hash at report time and flag drift — an
+ * artifact that changed after registration weakens the finding's
+ * tamper-evidence and the report must say so instead of silently vouching
+ * for the registration-time hash. Missing files are flagged too.
+ */
+export function evidenceRefDrift(config: ConfigType, refs: EvidenceRef[] | undefined): string[] {
+  const lines: string[] = []
+  for (const ref of refs ?? []) {
+    const resolved = safeWorkspacePath(workspaceDir(config), ref.artifact)
+    let current: string | null = null
+    if (resolved && existsSync(resolved)) {
+      try {
+        current = createHash('sha256').update(readFileSync(resolved)).digest('hex')
+      } catch {
+        current = null
+      }
+    }
+    if (current === null) {
+      lines.push(`⚠ ${ref.artifact}: artifact missing at report time (registered sha256:${ref.sha256.slice(0, 12)}…)`)
+    } else if (current !== ref.sha256) {
+      lines.push(`⚠ ${ref.artifact}: artifact CHANGED since registration (was sha256:${ref.sha256.slice(0, 12)}…, now sha256:${current.slice(0, 12)}…)`)
+    }
+  }
+  return lines
 }
 
 export function registerFinding(ctx: Context, config: ConfigType) {
@@ -256,6 +403,15 @@ export function registerFinding(ctx: Context, config: ConfigType) {
           description:
             'REQUIRED for create under strict mode: the concrete proof — full request/response, PoC output, '
             + 'or the demonstrated impact. This is the field that makes it a finding.',
+        },
+        evidence_refs: {
+          type: 'array',
+          items: { type: 'object', additionalProperties: true },
+          description:
+            'create/update: [{artifact, source, note?}] structured pointers to workspace artifacts backing the evidence '
+            + '(e.g. {artifact:"responses/req-001.json", source:"strix_http", note:"time-based blind SQL response pair"}). '
+            + 'The artifact must already exist inside the workspace — the plugin hashes it at registration and the report '
+            + 're-verifies the hash, so tampered or missing artifacts are flagged.',
         },
         cvss_vector: { type: 'string', description: 'CVSS v3.1 vector string, only metrics backed by evidence.' },
         counterevidence: { type: 'string', description: 'The strongest case AGAINST this finding, and why it does not hold.' },
@@ -309,6 +465,8 @@ export function registerFinding(ctx: Context, config: ConfigType) {
           if (!args.title) return 'REJECTED: title is required.'
           if (!args.severity) return 'REJECTED: severity is required.'
           if (!args.target) return 'REJECTED: target is required.'
+          const { refs: evidenceRefs, error: refsError } = normalizeEvidenceRefs(config, args.evidence_refs)
+          if (refsError) return refsError
           const draft = {
             title: String(args.title),
             vulnerability_type: String(args.vulnerability_type ?? 'other'),
@@ -316,6 +474,7 @@ export function registerFinding(ctx: Context, config: ConfigType) {
             target: String(args.target),
             description: String(args.description ?? ''),
             evidence: String(args.evidence ?? ''),
+            ...(evidenceRefs.length ? { evidence_refs: evidenceRefs } : {}),
             poc_script: args.poc_script ? String(args.poc_script) : undefined,
             cvss_vector: args.cvss_vector ? String(args.cvss_vector) : undefined,
             counterevidence: args.counterevidence ? String(args.counterevidence) : undefined,
@@ -356,6 +515,12 @@ export function registerFinding(ctx: Context, config: ConfigType) {
           if (args.confidence !== undefined && !CONFIDENCES.includes(args.confidence as (typeof CONFIDENCES)[number])) {
             return `REJECTED: confidence must be one of ${CONFIDENCES.join(', ')}.`
           }
+          if (args.cvss_vector !== undefined) {
+            const cvssError = validateCvssVector(String(args.cvss_vector))
+            if (cvssError) return cvssError
+          }
+          const { refs: updatedRefs, error: refsError } = normalizeEvidenceRefs(config, args.evidence_refs)
+          if (refsError) return refsError
           // Strict mode also covers updates: a confirmed finding must not be
           // quietly downgraded to evidence-less. Explicitly passing an empty
           // evidence is a downgrade; not passing it at all is fine.
@@ -374,6 +539,12 @@ export function registerFinding(ctx: Context, config: ConfigType) {
           const mutable = ['title', 'vulnerability_type', 'severity', 'target', 'description', 'evidence', 'cvss_vector', 'counterevidence', 'confidence', 'poc_script', 'remediation', 'code_locations', 'fix_pr_body'] as const
           for (const key of mutable) {
             if (args[key] !== undefined) (existing as unknown as Record<string, unknown>)[key] = args[key]
+          }
+          // evidence_refs replaces as a whole (normalized + hash-stamped
+          // above); an empty array clears them, matching update semantics.
+          if (args.evidence_refs !== undefined) {
+            if (updatedRefs.length > 0) existing.evidence_refs = updatedRefs
+            else delete existing.evidence_refs
           }
           existing.updated_at = new Date().toISOString()
           existing.update_history = [
@@ -456,16 +627,68 @@ export function missingFinishSections(args: Record<string, unknown>): string[] {
   return missing
 }
 
+/**
+ * Convergence pass at engagement close (roadmap phase 3): live strix-shell
+ * jobs get a bounded wait to settle, stragglers are killed with a stated
+ * reason, and the outcome is reported verbatim — close must never silently
+ * claim convergence it did not perform. Registry failures degrade to a
+ * noted skip rather than blocking the close.
+ */
+export async function convergeJobsAtFinish(ctx: Context, waitBudgetMs: number): Promise<string[]> {
+  type LiveJob = { id: string; label: string }
+  const snapshot = (): LiveJob[] => {
+    const jobs = ctx.jobs.list() as Array<{ id: string; kind: string; status: string; label: string }>
+    return jobs
+      .filter((j) => j.kind === 'strix-shell' && (j.status === 'running' || j.status === 'stopping'))
+      .map((j) => ({ id: j.id, label: j.label }))
+  }
+  let live: LiveJob[]
+  try {
+    live = snapshot()
+  } catch {
+    return ['(job registry unavailable — convergence skipped; unknown strix-shell jobs may still be running)']
+  }
+  if (live.length === 0) return []
+  const deadline = Date.now() + Math.max(0, waitBudgetMs)
+  for (const j of live) {
+    try {
+      await ctx.jobs.wait(j.id as never, Math.max(100, deadline - Date.now()))
+    } catch {
+      /* a wait that errors falls through to the kill pass below */
+    }
+  }
+  let still: LiveJob[]
+  try {
+    still = snapshot()
+  } catch {
+    still = live
+  }
+  const lines = [
+    `Jobs at close: ${live.length} live strix-shell job(s) — ${live.length - still.length} settled within ${waitBudgetMs}ms, ${still.length} killed.`,
+  ]
+  for (const j of still) {
+    try {
+      ctx.jobs.kill(j.id as never, undefined, 'engagement finish convergence')
+      lines.push(`- killed: ${j.label}`)
+    } catch {
+      lines.push(`- kill FAILED for: ${j.label} (verify no container is still running)`)
+    }
+  }
+  return lines
+}
+
 export function registerReport(ctx: Context, config: ConfigType) {
   ctx.tools.register(
     defineTool({
       name: 'strix_report',
       description:
         'Generate the engagement report (workspace/report.md) from registered findings and the coverage ledger: '
-        + 'executive summary, per-finding sections with evidence, reviewed-and-clean surfaces, and methodology note. '
+        + 'executive summary, per-finding sections with evidence and hash-stamped evidence_refs, reviewed-and-clean surfaces, and methodology note. '
         + 'action=sarif instead emits a SARIF 2.1.0 sidecar (workspace/findings.sarif) for CI code-scanning upload. '
         + 'action=finish closes the engagement with the four required executive sections — root/orchestrator only '
-        + '(operator children report back via send_message instead).',
+        + '(operator children report back via send_message instead). Close is a real convergence: live strix-shell jobs '
+        + 'are settled or killed, remaining needs_follow_up/blocked surfaces are listed honestly in the close section, '
+        + 'a frozen report-final.md copy is written, and a stale SARIF sidecar is refreshed.',
       parameters: {
         action: { type: 'string', description: 'report (default) | sarif | finish.' },
         engagement_title: { type: 'string', description: 'Report title. Default "Security Assessment Report".' },
@@ -515,6 +738,29 @@ export function registerReport(ctx: Context, config: ConfigType) {
             return `REJECTED: finish requires all four executive sections; missing: ${missing.join(', ')}.`
           }
           const reportPath = join(workspaceDir(config), 'report.md')
+          if (!existsSync(reportPath)) {
+            return 'REJECTED: no report.md yet — run action=report first, then finish appends the closing sections.'
+          }
+          const previous = readFileSync(reportPath, 'utf8')
+          // Idempotent close: a second finish must not stack another Close
+          // section — amend report.md by hand instead.
+          if (previous.includes(CLOSE_MARKER)) {
+            return 'REJECTED: this engagement is already closed (report.md has an Engagement Close section). '
+              + 'Amend report.md directly if the close needs changes — finish appends exactly once.'
+          }
+          // Convergence (phase 3): settle or kill live jobs, and account for
+          // honestly-open work — a close that hides loose ends is not a close.
+          const convergence = await convergeJobsAtFinish(ctx, config.finishJobWaitMs)
+          const ledger = readLedger(config)
+          const needsFollowUp = ledger.filter((e) => e.outcome === 'needs_follow_up')
+          const blocked = ledger.filter((e) => e.outcome === 'blocked')
+          const looseEndLines = [
+            `${needsFollowUp.length} needs_follow_up and ${blocked.length} blocked surface(s) remain open at close:`,
+            ...needsFollowUp.slice(0, 10).map((e) => `- needs_follow_up: ${e.surface} (${e.risk_area})${e.evidence_note ? ` — ${e.evidence_note}` : ''}`),
+            ...(needsFollowUp.length > 10 ? [`- …and ${needsFollowUp.length - 10} more (see coverage ledger)`] : []),
+            ...blocked.slice(0, 10).map((e) => `- blocked: ${e.surface} (${e.risk_area})${e.evidence_note ? ` — ${e.evidence_note}` : ''}`),
+            ...(blocked.length > 10 ? [`- …and ${blocked.length - 10} more (see coverage ledger)`] : []),
+          ]
           const closing = [
             '',
             '---',
@@ -522,6 +768,14 @@ export function registerReport(ctx: Context, config: ConfigType) {
             CLOSE_MARKER,
             '',
             `Closed: ${new Date().toISOString()}`,
+            '',
+            '### Convergence',
+            '',
+            ...(convergence.length > 0 ? convergence : ['No live strix-shell jobs at close.']),
+            '',
+            '### Loose Ends (honestly open)',
+            '',
+            ...looseEndLines,
             '',
             '### Executive Summary',
             '',
@@ -539,20 +793,34 @@ export function registerReport(ctx: Context, config: ConfigType) {
             '',
             String(args.recommendations),
           ].join('\n')
-          if (!existsSync(reportPath)) {
-            return 'REJECTED: no report.md yet — run action=report first, then finish appends the closing sections.'
-          }
-          const previous = readFileSync(reportPath, 'utf8')
-          // Idempotent close: a second finish must not stack another Close
-          // section — amend report.md by hand instead.
-          if (previous.includes(CLOSE_MARKER)) {
-            return 'REJECTED: this engagement is already closed (report.md has an Engagement Close section). '
-              + 'Amend report.md directly if the close needs changes — finish appends exactly once.'
-          }
           writeFileSync(reportPath, `${previous}\n${closing}`, 'utf8')
-          const presentHint = ' Present report.md (and findings.sarif when generated) with the present tool '
+          // Freeze: the closed report gets a stable final copy, and a stale
+          // SARIF sidecar is refreshed so the delivered pair is consistent.
+          const freezeNotes: string[] = []
+          const finalPath = join(workspaceDir(config), 'report-final.md')
+          try {
+            copyFileSync(reportPath, finalPath)
+            freezeNotes.push(`Frozen final copy: ${finalPath}`)
+          } catch (err) {
+            freezeNotes.push(`WARNING: could not write the frozen copy ${finalPath} (${err instanceof Error ? err.message : String(err)}) — report.md is still the closed record.`)
+          }
+          const sarifTarget = args.sarif_file
+            ? String(args.sarif_file)
+            : (existsSync(join(workspaceDir(config), 'findings.sarif')) ? 'findings.sarif' : undefined)
+          if (sarifTarget) {
+            try {
+              const written = writeSarifReport(config, findings, ledger, sarifTarget)
+              freezeNotes.push(`SARIF refreshed: ${written.path} (${written.results} results)`)
+            } catch (err) {
+              freezeNotes.push(`WARNING: SARIF refresh failed (${err instanceof Error ? err.message : String(err)}) — the sidecar may predate the close.`)
+            }
+          }
+          const presentHint = ' Present report-final.md (and findings.sarif when generated) with the present tool '
             + 'so the operator receives durable file references.'
-          return `Engagement closed: four executive sections appended to ${reportPath} (${findings.length} findings).${presentHint}`
+          return `Engagement closed: four executive sections appended to ${reportPath} (${findings.length} findings). `
+            + `Convergence: ${convergence.length > 0 ? convergence[0] : 'no live jobs.'} `
+            + `Loose ends: ${needsFollowUp.length} needs_follow_up, ${blocked.length} blocked. `
+            + `${freezeNotes.join(' ')}${presentHint}`
         }
         if (args.action !== undefined && args.action !== 'report') {
           return `Unknown action "${args.action}". Use report | sarif | finish.`
@@ -613,6 +881,18 @@ export function registerReport(ctx: Context, config: ConfigType) {
             f.evidence,
             '```',
           )
+          const refs = f.evidence_refs ?? []
+          if (refs.length > 0) {
+            out.push('', '**Evidence artifacts (hash-stamped at registration):**', '')
+            for (const ref of refs) {
+              out.push(`- \`${ref.artifact}\` (${ref.source}, sha256:${ref.sha256.slice(0, 12)}…)${ref.note ? ` — ${ref.note}` : ''}`)
+            }
+            // Re-verify at report time: a drifted or missing artifact
+            // weakens the finding and the report must say so.
+            for (const drift of evidenceRefDrift(config, f.evidence_refs)) {
+              out.push(`- ${drift}`)
+            }
+          }
           if (f.poc_script) out.push('', `PoC script: ${f.poc_script}`)
           if (f.counterevidence) out.push('', `**Counterevidence considered:** ${f.counterevidence}`)
           if (f.remediation) out.push('', `**Remediation:** ${f.remediation}`)

@@ -61,6 +61,11 @@ export function registerRuns(ctx: Context, config: ConfigType) {
 
         lines.push(`threat-model: ${existsSync(join(ws, 'threat-model.md')) ? 'present' : 'not established'}`)
         lines.push(`report: ${existsSync(join(ws, 'report.md')) ? join(ws, 'report.md') : 'not generated'}`)
+        // Closed engagements are visible at a glance: a finished engagement
+        // must not be silently continued as if it were still open.
+        if (existsSync(join(ws, 'report-final.md'))) {
+          lines.push('engagement: CLOSED (report-final.md exists — finish was run; do not continue active testing)')
+        }
 
         const reconDir = join(ws, 'recon')
         if (existsSync(reconDir)) {

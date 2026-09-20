@@ -95,7 +95,8 @@ age: 245897
 | `severity` | string | create | `info` `low` `medium` `high` `critical` |
 | `target` | string | create | Affected target (URL/host/code path) |
 | `evidence` | string | **required in strict mode** | **Concrete proof**: full request/response pair, PoC output, or a complete reachable exploit trace. The qualifying field that "makes it a finding" |
-| `cvss_vector` | string | no | CVSS v3.1 vector; **every non-None metric must map to demonstrated content in evidence** |
+| `evidence_refs` | array | no (strongly recommended) | `[{artifact, source, note?}]` structured artifact references (phase 3): artifact must be a file that ALREADY exists inside the workspace (e.g. `responses/req-001.json`, `screenshots/`); the plugin computes sha256 + stamps the time at registration (**a model-claimed hash attests nothing**); report generation re-hashes and flags tampered/missing artifacts with ⚠ lines. Escaping paths or missing files reject the whole filing |
+| `cvss_vector` | string | no | CVSS v3.1 vector; **syntax-validated** (`CVSS:3.1/` prefix + known metric keys + all eight base metrics, malformed vectors reject the filing); **every non-None metric must map to demonstrated content in evidence** |
 | `counterevidence` | string | no (strongly recommended) | Counter-case: the strongest argument against this finding and why it does not hold |
 | `confidence` | string | no | high/medium/low; static-only traces rate medium at best |
 | `poc_script` | string | no | PoC script path (workspace-relative) |
@@ -115,9 +116,11 @@ Registered F-001 [info] Toolchain verification entry — local-verification.
 
 - Strict mode (default) without `evidence` → `"REJECTED: no evidence. A finding without a demonstrated PoC ... is at best an open_proof_gap. Record it in strix_coverage with needs_follow_up instead..."`
 - Illegal severity/type → enum error
+- `evidence_refs` escaping the workspace / pointing at missing files / missing artifact or source → whole filing rejected (capture the evidence first — e.g. `strix_http save_to`, `strix_browser screenshot` — then reference it)
+- Malformed `cvss_vector` (bad prefix / unknown metric / missing base metrics) → rejected on create and update
 - Dedup discipline: revise the same issue with `update` (carrying `update_reason`), never re-create; run `dedupe-check` before create — same type + endpoint + overlapping target text yields `DUPLICATE of F-NNN` (dependency_cve keys on CVE + package; different manifests count as two), deterministic with no LLM. Verified live: a ThinkPHP RCE re-check returned `DUPLICATE of F-001`, an unrelated target returned `NOT A DUPLICATE`
 
-**Storage**: `workspace/findings/F-NNN.json` (with created_at/updated_at/update_history).
+**Storage**: `workspace/findings/F-NNN.json` (with created_at/updated_at/update_history; evidence_refs carry plugin-computed sha256/registered_at).
 
 ---
 
@@ -134,10 +137,10 @@ Registered F-001 [info] Toolchain verification entry — local-verification.
 | `caller_role` | string | finish (`root` passes; an `operator` child is refused) |
 | `executive_summary` / `methodology` / `technical_analysis` / `recommendations` | string | finish, all four required |
 
-**Output**: writes `workspace/report.md`, returns path + stats. Structure: Scope & Authorization (incl. authorization summary: targets/grant facts/pre-approved POST count/masked test accounts; header prints the workspace path — one target set, one workspace) → Executive Summary (counts by severity) → Findings (each: severity/CVSS/type/target/confidence/description/evidence code block/PoC script/counterevidence/remediation/white-box diff) → **Coverage Ledger (including reviewed-clean surfaces)** → Methodology.
+**Output**: writes `workspace/report.md`, returns path + stats. Structure: Scope & Authorization (incl. authorization summary: targets/grant facts/pre-approved POST count/masked test accounts; header prints the workspace path — one target set, one workspace) → Executive Summary (counts by severity) → Findings (each: severity/CVSS/type/target/confidence/description/evidence code block/evidence artifacts (sha256-stamped, drift-flagged ⚠)/PoC script/counterevidence/remediation/white-box diff) → **Coverage Ledger (including reviewed-clean surfaces)** → Methodology.
 
 - `action=sarif`: writes `workspace/findings.sarif` (SARIF 2.1.0: rules keyed `strix/<type>` + coverage zones `strix/coverage/<area>`; severities collapse to three levels with raw label + CVSS kept in `properties.strix`; sourceless DAST findings anchor on a flagged synthetic SECURITY.md location; `code_locations` become fixes; coverage rides as pass/open non-failing results). Verified live: `3 rules, 4 results: 1 findings, 3 coverage`, ready for `upload-sarif` into CI.
-- `action=finish`: orchestrator-only engagement close (`caller_role=operator` is refused with a pointer to `send_message`; missing sections are named one by one), appending `## Engagement Close (finish)` with the four sections to report.md. **Idempotent**: a second finish on an already-closed engagement is refused (amend report.md by hand); a regenerated `report` preserves the existing Close section (report→finish→report never silently un-closes).
+- `action=finish`: orchestrator-only engagement close (`caller_role=operator` is refused with a pointer to `send_message`; missing sections are named one by one), appending `## Engagement Close (finish)` with the four sections to report.md. **Close is a real convergence** (phase 3): live strix-shell jobs get a bounded wait (`finishJobWaitMs`, default 10s) then stragglers are killed and recorded verbatim in the close section (`### Convergence`); remaining needs_follow_up/blocked surfaces are listed honestly (`### Loose Ends`); a frozen `report-final.md` copy is written; an existing SARIF sidecar is refreshed so the delivered pair is consistent. `strix_runs` then shows `engagement: CLOSED`. **Idempotent**: a second finish on an already-closed engagement is refused (amend report.md by hand); a regenerated `report` preserves the existing Close section (report→finish→report never silently un-closes).
 
 **Real output example**:
 

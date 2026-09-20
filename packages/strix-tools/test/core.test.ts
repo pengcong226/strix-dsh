@@ -4,6 +4,7 @@
  * bounded-output helper. No Docker, no network, no LLM — safe in CI.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,7 +18,7 @@ import { createApprovalGate, matchesAutoAllow, splitApprovalSummary } from '../s
 import { methodologySection } from '../src/index.js'
 import { formatDepFinding, parseOsvVuln, readKevCache, runPool, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_METHODS, normalizePathKey } from '../src/tools/http.js'
-import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, listFindings, missingFinishSections, registerFinding, registerReport, validateFinding } from '../src/tools/finding.js'
+import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, evidenceRefDrift, listFindings, missingFinishSections, normalizeEvidenceRefs, registerFinding, registerReport, validateCvssVector, validateFinding } from '../src/tools/finding.js'
 import { OUTCOMES, readLedger, registerCoverage, writeLedger } from '../src/tools/coverage.js'
 import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, registerAuthorization, renderAuthorizationSection, targetCoveredByAuth } from '../src/tools/authorization.js'
 import { claimPostCount, postCountsPath, readPostCounts } from '../src/tools/http.js'
@@ -67,6 +68,7 @@ function scratchConfig(): ConfigType {
     sastNetwork: true,
     sastExtraMountRoots: [],
     depcheckTimeoutMs: 5_000,
+    finishJobWaitMs: 200,
     proxyImage: 'mitmproxy/mitmproxy:latest',
     browserHeadless: true,
     browserEnforcePostPolicy: true,
@@ -1569,6 +1571,194 @@ describe('create validation (strict evidence, trimmed)', () => {
   it('rejects out-of-list confidence', () => {
     expect(validateFinding({ evidence: 'x', confidence: 'banana' }, false)).toMatch(/confidence/)
     expect(validateFinding({ evidence: 'x', confidence: 'high' }, false)).toBeNull()
+  })
+})
+
+describe('structured evidence refs (phase 3: tamper-evident artifacts)', () => {
+  it('normalizeEvidenceRefs: undefined passes through, non-array is rejected', () => {
+    const config = scratchConfig()
+    expect(normalizeEvidenceRefs(config, undefined)).toEqual({ refs: [], error: null })
+    expect(normalizeEvidenceRefs(config, 'nope').error).toMatch(/REJECTED/)
+    expect(normalizeEvidenceRefs(config, {}).error).toMatch(/REJECTED/)
+  })
+
+  it('rejects refs missing fields, escaping the workspace, or pointing at missing files', () => {
+    const config = scratchConfig()
+    expect(normalizeEvidenceRefs(config, [{ source: 'strix_http' }]).error).toMatch(/artifact/)
+    expect(normalizeEvidenceRefs(config, [{ artifact: 'responses/x.json' }]).error).toMatch(/source/)
+    expect(normalizeEvidenceRefs(config, [{ artifact: '../../etc/passwd', source: 'strix_http' }]).error).toMatch(/workspace/)
+    expect(normalizeEvidenceRefs(config, [{ artifact: 'responses/never-saved.json', source: 'strix_http' }]).error).toMatch(/does not exist/)
+  })
+
+  it('stamps plugin-computed sha256 + registered_at, trims the note', () => {
+    const config = scratchConfig()
+    const dir = join(config.workspaceDir, 'responses')
+    mkdirSync(dir, { recursive: true })
+    const body = '{"status":500,"body":"sql error"}'
+    writeFileSync(join(dir, 'req-001.json'), body, 'utf8')
+    const { refs, error } = normalizeEvidenceRefs(config, [
+      { artifact: 'responses/req-001.json', source: 'strix_http', note: '  time-based blind pair  ' },
+    ])
+    expect(error).toBeNull()
+    expect(refs).toHaveLength(1)
+    expect(refs[0]!.sha256).toBe(createHash('sha256').update(body).digest('hex'))
+    expect(refs[0]!.registered_at).toBeTruthy()
+    expect(refs[0]!.note).toBe('time-based blind pair')
+  })
+
+  it('evidenceRefDrift flags changed and missing artifacts, stays silent when intact', () => {
+    const config = scratchConfig()
+    const dir = join(config.workspaceDir, 'screenshots')
+    mkdirSync(dir, { recursive: true })
+    for (const name of ['a.png', 'b.png', 'c.png']) writeFileSync(join(dir, name), `content-${name}`, 'utf8')
+    const { refs } = normalizeEvidenceRefs(config, [
+      { artifact: 'screenshots/a.png', source: 'strix_browser' },
+      { artifact: 'screenshots/b.png', source: 'strix_browser' },
+      { artifact: 'screenshots/c.png', source: 'strix_browser' },
+    ])
+    writeFileSync(join(dir, 'a.png'), 'tampered', 'utf8')
+    rmSync(join(dir, 'c.png'))
+    const drift = evidenceRefDrift(config, refs)
+    expect(drift).toHaveLength(2)
+    expect(drift.join('\n')).toMatch(/a\.png.*CHANGED/)
+    expect(drift.join('\n')).toMatch(/c\.png.*missing/)
+    expect(drift.join('\n')).not.toContain('b.png')
+  })
+
+  it('create wires evidence_refs; the report renders them and flags post-registration tampering', async () => {
+    const config = scratchConfig()
+    let captured: { execute: (a: unknown, e: unknown) => Promise<string> } | undefined
+    registerFinding({ tools: { register: (t) => { captured = t } } } as never, config)
+    const dir = join(config.workspaceDir, 'responses')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'poc.json'), 'proof-v1', 'utf8')
+    const out = await captured!.execute({
+      action: 'create', title: 'SQLi in login', severity: 'high', target: 'http://t/login',
+      vulnerability_type: 'sqli', evidence: 'uid=33',
+      evidence_refs: [{ artifact: 'responses/poc.json', source: 'strix_http', note: 'response pair' }],
+    }, {})
+    expect(out).toMatch(/F-001/)
+    // Tamper AFTER registration — the report must catch it, not vouch for it.
+    writeFileSync(join(dir, 'poc.json'), 'proof-v2', 'utf8')
+    const rcaptured: Record<string, { execute: (a: unknown, e: unknown) => Promise<string> }> = {}
+    registerReport({ tools: { register: (t) => { rcaptured[t.name] = t } } } as never, config)
+    await rcaptured.strix_report!.execute({ action: 'report' }, {})
+    const md = readFileSync(join(config.workspaceDir, 'report.md'), 'utf8')
+    expect(md).toContain('Evidence artifacts')
+    expect(md).toContain('responses/poc.json')
+    expect(md).toMatch(/CHANGED since registration/)
+  })
+})
+
+describe('CVSS v3.1 vector syntax validation (phase 3)', () => {
+  it('accepts valid base and full temporal+environmental vectors', () => {
+    expect(validateCvssVector('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H')).toBeNull()
+    expect(validateCvssVector('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/E:U/RL:O/RC:C/CR:H/IR:M/AR:H/MAV:A/MC:L')).toBeNull()
+  })
+
+  it('rejects bad prefix, unknown metric, malformed value, missing base metrics', () => {
+    expect(validateCvssVector('CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H')).toMatch(/REJECTED/)
+    expect(validateCvssVector('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/XX:H')).toMatch(/metric/)
+    expect(validateCvssVector('CVSS:3.1/AV:n/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H')).toMatch(/uppercase/)
+    expect(validateCvssVector('CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H')).toMatch(/missing base metric/)
+  })
+
+  it('gates create through validateFinding', () => {
+    expect(validateFinding({ evidence: 'x', cvss_vector: 'not-a-vector' }, false)).toMatch(/cvss_vector/)
+    expect(validateFinding({ evidence: 'x', cvss_vector: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H' }, false)).toBeNull()
+  })
+})
+
+describe('finish convergence (phase 3: close is a real terminal state)', () => {
+  async function finishTool(config: ConfigType, jobs: unknown): Promise<{ execute: (a: unknown, e: unknown) => Promise<string> }> {
+    const captured: Record<string, { execute: (a: unknown, e: unknown) => Promise<string> }> = {}
+    registerReport({ tools: { register: (t) => { captured[t.name] = t } }, jobs } as never, config)
+    if (!existsSync(join(config.workspaceDir, 'report.md'))) {
+      writeFileSync(join(config.workspaceDir, 'report.md'), '# Report\n\nbody\n', 'utf8')
+    }
+    return captured.strix_report!
+  }
+
+  const finishArgs = {
+    action: 'finish', caller_role: 'root',
+    executive_summary: 's', methodology: 'm', technical_analysis: 't', recommendations: 'r',
+  }
+
+  function seedLedger(config: ConfigType) {
+    writeLedger(config, [
+      { id: 'C-001', surface: 'http://a.example/login', risk_area: 'auth', outcome: 'needs_follow_up', evidence_note: 'needs test account', recorded_at: 't0' },
+      { id: 'C-002', surface: 'http://b.example/admin', risk_area: 'rce', outcome: 'blocked', evidence_note: 'WAF', recorded_at: 't0' },
+      { id: 'C-003', surface: 'http://c.example/', risk_area: 'info', outcome: 'clean', evidence_note: '', recorded_at: 't0' },
+    ])
+  }
+
+  it('no live jobs: loose ends listed honestly, report-final.md frozen', async () => {
+    const config = scratchConfig()
+    seedLedger(config)
+    const tool = await finishTool(config, { list: () => [] })
+    const out = await tool.execute(finishArgs, {})
+    expect(out).toMatch(/Engagement closed/)
+    expect(out).toMatch(/1 needs_follow_up, 1 blocked/)
+    const md = readFileSync(join(config.workspaceDir, 'report.md'), 'utf8')
+    expect(md).toContain('### Convergence')
+    expect(md).toContain('No live strix-shell jobs at close.')
+    expect(md).toContain('needs_follow_up: http://a.example/login')
+    expect(md).toContain('blocked: http://b.example/admin')
+    expect(existsSync(join(config.workspaceDir, 'report-final.md'))).toBe(true)
+  })
+
+  it('a job that settles within the budget is not killed', async () => {
+    const config = scratchConfig()
+    let running = true
+    const kills: string[] = []
+    const jobs = {
+      list: () => (running ? [{ id: 'strix-shell-1', kind: 'strix-shell', status: 'running', label: 'nmap scan' }] : []),
+      wait: async () => { running = false },
+      kill: (id: string, _c: unknown, reason: string) => { kills.push(`${id}:${reason}`) },
+    }
+    const tool = await finishTool(config, jobs)
+    const out = await tool.execute(finishArgs, {})
+    expect(kills).toHaveLength(0)
+    expect(out).toMatch(/1 settled within/)
+  })
+
+  it('a straggler past the budget is killed with a stated reason', async () => {
+    const config = scratchConfig()
+    const kills: string[] = []
+    const jobs = {
+      list: () => [{ id: 'strix-shell-2', kind: 'strix-shell', status: 'running', label: 'slow nuclei' }],
+      wait: async () => { throw new Error('timeout') },
+      kill: (id: string, _c: unknown, reason: string) => { kills.push(`${id}:${reason}`) },
+    }
+    const tool = await finishTool(config, jobs)
+    const out = await tool.execute(finishArgs, {})
+    expect(kills).toEqual(['strix-shell-2:engagement finish convergence'])
+    expect(out).toMatch(/killed/)
+    const md = readFileSync(join(config.workspaceDir, 'report.md'), 'utf8')
+    expect(md).toContain('- killed: slow nuclei')
+  })
+
+  it('refreshes a stale SARIF sidecar at close', async () => {
+    const config = scratchConfig()
+    mkdirSync(join(config.workspaceDir, 'findings'), { recursive: true })
+    writeFileSync(join(config.workspaceDir, 'findings', 'F-001.json'), JSON.stringify({
+      id: 'F-001', title: 'X', vulnerability_type: 'xss', severity: 'low', target: 'http://t/',
+      description: 'd', evidence: 'e', created_at: 't0',
+    }), 'utf8')
+    writeFileSync(join(config.workspaceDir, 'findings.sarif'), 'stale', 'utf8')
+    const tool = await finishTool(config, { list: () => [] })
+    const out = await tool.execute(finishArgs, {})
+    expect(out).toMatch(/SARIF refreshed/)
+    const sarif = JSON.parse(readFileSync(join(config.workspaceDir, 'findings.sarif'), 'utf8'))
+    expect(sarif.version).toBe('2.1.0')
+  })
+
+  it('second finish is still rejected (idempotent close)', async () => {
+    const config = scratchConfig()
+    const tool = await finishTool(config, { list: () => [] })
+    await tool.execute(finishArgs, {})
+    const out2 = await tool.execute(finishArgs, {})
+    expect(out2).toMatch(/already closed/)
   })
 })
 

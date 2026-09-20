@@ -97,7 +97,8 @@ age: 245897
 | `severity` | string | create | `info` `low` `medium` `high` `critical` |
 | `target` | string | create | 受影响目标（URL/host/代码路径） |
 | `evidence` | string | **strict 模式必填** | **具体证明**：完整请求/响应对、PoC 输出、或完整可达的利用链轨迹。这是"成为发现"的资格字段 |
-| `cvss_vector` | string | 否 | CVSS v3.1 向量；**每个非 None 指标必须对应 evidence 中已演示的内容** |
+| `evidence_refs` | array | 否（强烈建议） | `[{artifact, source, note?}]` 结构化证据工件引用（阶段三）：artifact 必须是**已存在**的工作区内文件（如 `responses/req-001.json`、`screenshots/`），插件登记时计算 sha256 并盖时间戳（**不信模型自报哈希**）；报告生成时重算哈希，工件被改/丢失会以 ⚠ 行标出。越界路径/缺失文件整单拒收 |
+| `cvss_vector` | string | 否 | CVSS v3.1 向量；**语法校验**（`CVSS:3.1/` 前缀 + 合法指标键 + 八项基础指标齐全，非法整单拒收）；**每个非 None 指标必须对应 evidence 中已演示的内容** |
 | `counterevidence` | string | 否（强烈建议） | 反证陈述：反对这个发现的最强论据及为何不成立 |
 | `confidence` | string | 否 | high/medium/low；纯静态轨迹至多 medium |
 | `poc_script` | string | 否 | PoC 脚本路径（工作区相对） |
@@ -117,9 +118,11 @@ Registered F-001 [info] Toolchain verification entry — local-verification.
 
 - strict 模式（默认）无 `evidence` → `"REJECTED: no evidence. A finding without a demonstrated PoC ... is at best an open_proof_gap. Record it in strix_coverage with needs_follow_up instead..."`
 - 非法 severity/type → 枚举错误
+- `evidence_refs` 越界（逃出工作区）/文件不存在/缺 artifact 或 source → 整单拒收（先落证据再引用，如 `strix_http save_to`、`strix_browser screenshot`）
+- `cvss_vector` 语法非法（坏前缀/未知指标/缺基础指标）→ create/update 均拒收
 - 去重纪律：同一问题用 `update`（带 `update_reason`）修订，不重复 create；先 `dedupe-check` 再 create——同类型+同端点+目标文本重叠即 `DUPLICATE of F-NNN`（dependency_cve 按 CVE+包名，不同 manifest 算两个），无 LLM 确定性判定。实测：ThinkPHP RCE 复验判 `DUPLICATE of F-001`，无关目标判 `NOT A DUPLICATE`
 
-**存储**：`workspace/findings/F-NNN.json`（含 created_at/updated_at/update_history）。
+**存储**：`workspace/findings/F-NNN.json`（含 created_at/updated_at/update_history；evidence_refs 含插件计算的 sha256/registered_at）。
 
 ---
 
@@ -136,10 +139,10 @@ Registered F-001 [info] Toolchain verification entry — local-verification.
 | `caller_role` | string | finish（`root` 才放行；`operator` 子代理拒绝） |
 | `executive_summary` / `methodology` / `technical_analysis` / `recommendations` | string | finish 四段必填 |
 
-**输出**：写 `workspace/report.md`，返回路径与统计。结构：Scope & Authorization（含授权摘要段：targets/granted_by/scope_ref/valid_until/约束/预批 POST 数/测试账号掩码；无授权写 none recorded）→ Executive Summary（按严重度计数）→ Findings（逐个：严重度/CVSS/类型/目标/confidence/描述/证据代码块/PoC 脚本/反证/修复/白盒 diff）→ **Coverage Ledger（含测过没洞的表面；ruled_out 行单独计数注释）** → Methodology。报告头打印 workspace 路径（一目标一工作区，跨 engagement 混用前先看 `strix_runs`）。
+**输出**：写 `workspace/report.md`，返回路径与统计。结构：Scope & Authorization（含授权摘要段：targets/granted_by/scope_ref/valid_until/约束/预批 POST 数/测试账号掩码；无授权写 none recorded）→ Executive Summary（按严重度计数）→ Findings（逐个：严重度/CVSS/类型/目标/confidence/描述/证据代码块/证据工件引用（sha256 戳 + 漂移 ⚠）/PoC 脚本/反证/修复/白盒 diff）→ **Coverage Ledger（含测过没洞的表面；ruled_out 行单独计数注释）** → Methodology。报告头打印 workspace 路径（一目标一工作区，跨 engagement 混用前先看 `strix_runs`）。
 
 - `action=sarif`：写 `workspace/findings.sarif`（SARIF 2.1.0：规则按漏洞类 `strix/<type>` + coverage 区 `strix/coverage/<area>`；severity 折三级、原标签+CVSS 留 `properties.strix`；无源码位置的 DAST 发现锚定 SECURITY.md 合成位置并标记；`code_locations` 出 fixes；coverage 作 pass/open 非失败 result）。实测：`3 rules, 4 results: 1 findings, 3 coverage`，可 `upload-sarif` 进 CI。
-- `action=finish`：仅编排者关闭 engagement（`caller_role=operator` 拒绝，指路 `send_message` 向父汇报；缺段逐项点名），四段追加到 report.md 尾 `## Engagement Close (finish)`。**幂等**：已有关闭段时第二次 finish 拒绝（直接改 report.md）；`report` 重生成会保留已有关闭段（report→finish→report 不会静默 un-close）。
+- `action=finish`：仅编排者关闭 engagement（`caller_role=operator` 拒绝，指路 `send_message` 向父汇报；缺段逐项点名），四段追加到 report.md 尾 `## Engagement Close (finish)`。**收敛即终态**（阶段三）：关闭前对存活 strix-shell job 有限等待（`finishJobWaitMs`，默认 10s）→ 超时 kill 并在关闭段如实记录（`### Convergence`）；未决项诚实盘点（`### Loose Ends`：needs_follow_up/blocked 表面逐条列出）；写冻结副本 `report-final.md`；已有 SARIF 边车同步刷新（交付对一致）。`strix_runs` 会显示 `engagement: CLOSED`。**幂等**：已有关闭段时第二次 finish 拒绝（直接改 report.md）；`report` 重生成会保留已有关闭段（report→finish→report 不会静默 un-close）。
 
 **真实输出示例**：
 
