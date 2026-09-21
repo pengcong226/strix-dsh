@@ -7,11 +7,11 @@
 | `subagent` | 无（继承编排者） | 全量：可再规划、再派发 |
 | `strix_operator` | Operator（动手执行，不规划/不派发/不改范围） | 叶子：deny 掉再派发、workflow、goal 工具 |
 
-deny 列表（2026-09-03 经 headless `--patch` 双胞胎实测验证）：
+deny 列表（2026-09-03 经 headless `--patch` 双胞胎实测验证；0.12.7 增补 `present`——交付物声明归编排者）：
 
 ```yaml
 toolFilter:
-  deny: [subagent, subagent_fork, strix_operator, workflow, ralph, create_goal, get_goal, update_goal]
+  deny: [subagent, subagent_fork, strix_operator, workflow, ralph, create_goal, get_goal, update_goal, present]
 ```
 
 注意：
@@ -45,4 +45,4 @@ node -e "
 "
 ```
 
-注意：harnessBase 传错目录会把两个 preset 都报 BROKEN（`strix-dsh-tools` 解析不到）——这是验证脚本的 base 问题，不是 preset 的问题。
+注意：harnessBase 传错目录会把 preset 报 BROKEN（`strix-dsh-tools` 解析不到）——这是验证脚本的 base 问题，不是 preset 的问题。桌面端的预设行按**应用内 runtime base** 解析（`resources/app/dsh/node_modules`），插件需同时存在于该处（见 docs/desktop-deploy-2026-09-21.md 第三节）。

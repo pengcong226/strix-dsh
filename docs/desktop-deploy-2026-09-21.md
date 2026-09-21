@@ -44,6 +44,15 @@ rm -rf "$DST/dist" "$DST/assets" && cp -r dist assets cordis.patch.yml package.j
 # ~/.dsh/profiles/desktop/package.json 的 dependencies 版本号同步改 0.12.10
 ```
 
+**⚠ 必须的第二处拷贝——runtime node_modules（预设可用性依赖）**：agent 预设的行按**应用内 runtime base**（`resources/app/dsh/node_modules`）做健康检查与解析，profile 安装**不够**——`strix` 预设里的 `strix-tools` 行解析不到会把整个预设判"不可用"（2026-09-21 实际踩坑）。预设行引用的包名还要跟着上游 runtime 包集走（同日 `workflow-worker-thread`→`workflow-ptc` 更名即此例）：
+
+```bash
+RT="<安装目录>/resources/app/dsh/node_modules"
+mkdir -p "$RT/strix-dsh-tools" && cp -r dist assets cordis.patch.yml package.json "$RT/strix-dsh-tools/"
+```
+
+**插件现存三份副本**（发版时三处同步）：仓库 `packages/strix-tools`（源头）、profile `node_modules`（全局挂载）、runtime `node_modules`（预设行解析 + 预设 scope 挂载）。启动日志注册行出现**两次**属预期（profile 全局 + 预设 standing scope 各一次）。
+
 ## 四、验证结果
 
 - 新桌面（0.1.6-alpha.2）启动正常（Electron 多进程 + web UI 动态端口）
