@@ -51,7 +51,9 @@ RT="<安装目录>/resources/app/dsh/node_modules"
 mkdir -p "$RT/strix-dsh-tools" && cp -r dist assets cordis.patch.yml package.json "$RT/strix-dsh-tools/"
 ```
 
-**插件现存三份副本**（发版时三处同步）：仓库 `packages/strix-tools`（源头）、profile `node_modules`（全局挂载）、runtime `node_modules`（预设行解析 + 预设 scope 挂载）。启动日志注册行出现**两次**属预期（profile 全局 + 预设 standing scope 各一次）。
+**插件现存三份副本**（发版时三处同步）：仓库 `packages/strix-tools`（源头）、profile `node_modules`（**解析安全网**——bundles 行已于 2026-09-21 移除，见下）、runtime `node_modules`（预设行解析 + 预设 scope 挂载）。
+
+**模式隔离（2026-09-21）**：desktop profile 的 `dsh.profile.bundles` 里移除了 `strix-dsh-tools` 行——此前插件进程全局挂载，**所有模式**（standard/ptc/minimal 编码会话）都会带上 16 个 strix 工具 + 方法论/授权提示词 section（"You are operating as an authorized security validation agent" 对非渗透会话是提示词污染）。移除后：strix-dsh 模式会话经预设行照常获得全部能力，其他模式完全干净。启动日志注册行从两次变为**一次**（预设 standing scope）即隔离生效的验收信号。
 
 ## 四、验证结果
 
