@@ -83,7 +83,12 @@ export function formatFlow(f: FlowSummary): string {
  */
 export function dockerPsLineMatchesPort(line: string, port: number, imageKey: string): boolean {
   if (!line.includes(imageKey)) return false
-  return line.includes(`0.0.0.0:${port}->`) || line.includes(`[::]:${port}->`)
+  // 127.0.0.1 is the publish form we CREATE since the loopback-bind fix;
+  // 0.0.0.0/[::] match sidecars started by older plugin versions (and any
+  // the operator launched by hand with the default binding).
+  return line.includes(`127.0.0.1:${port}->`)
+    || line.includes(`0.0.0.0:${port}->`)
+    || line.includes(`[::]:${port}->`)
 }
 
 async function dockerContainerForPort(port: number, imageKey: string): Promise<string | null> {
@@ -279,7 +284,10 @@ export function registerProxy(ctx: Context, config: ConfigType) {
             'docker',
             [
               'run', '--rm',
-              '-p', `${port}:8080`,
+              // Loopback-bound publish: the tool promises a localhost-only
+              // sidecar, and a bare -p binds 0.0.0.0 + [::] (LAN-reachable,
+              // firewall permitting). 127.0.0.1: makes the claim true.
+              '-p', `127.0.0.1:${port}:8080`,
               '-v', `${ws}:/workspace`,
               '-v', `${addonHost}:/addon.py:ro`,
               config.proxyImage,

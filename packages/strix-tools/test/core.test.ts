@@ -18,7 +18,7 @@ import { createApprovalGate, matchesAutoAllow, splitApprovalSummary } from '../s
 import { methodologySection } from '../src/index.js'
 import { formatDepFinding, parseOsvVuln, readKevCache, runPool, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_METHODS, normalizePathKey } from '../src/tools/http.js'
-import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, evidenceRefDrift, listFindings, missingFinishSections, normalizeEvidenceRefs, registerFinding, registerReport, validateCvssVector, validateFinding } from '../src/tools/finding.js'
+import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, convergeJobsAtFinish, evidenceRefDrift, listFindings, missingFinishSections, normalizeEvidenceRefs, registerFinding, registerReport, validateCvssVector, validateFinding } from '../src/tools/finding.js'
 import { OUTCOMES, readLedger, registerCoverage, writeLedger } from '../src/tools/coverage.js'
 import { authorizationPath, isAuthorizationExpired, maskTestAccount, matchesPreApprovedPost, readAuthorization, registerAuthorization, renderAuthorizationSection, targetCoveredByAuth } from '../src/tools/authorization.js'
 import { claimPostCount, postCountsPath, readPostCounts } from '../src/tools/http.js'
@@ -1106,6 +1106,9 @@ describe('proxy flow queries', () => {
     expect(dockerPsLineMatchesPort('abc123 0.0.0.0:8080->8080/tcp mitmproxy/mitmproxy:latest', 8080, image)).toBe(true)
     expect(dockerPsLineMatchesPort('abc123 [::]:8080->8080/tcp mitmproxy/mitmproxy:latest', 8080, image)).toBe(true)
     expect(dockerPsLineMatchesPort('abc123 0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp mitmproxy/mitmproxy', 8080, image)).toBe(true)
+    // The loopback-bound form WE publish since the 127.0.0.1 fix — the stop
+    // path must still find the container it started.
+    expect(dockerPsLineMatchesPort('abc123 127.0.0.1:8080->8080/tcp mitmproxy/mitmproxy:latest', 8080, image)).toBe(true)
     // Wrong port, wrong image, or a substring of another port must not match.
     expect(dockerPsLineMatchesPort('abc123 0.0.0.0:8081->8080/tcp mitmproxy/mitmproxy:latest', 8080, image)).toBe(false)
     expect(dockerPsLineMatchesPort('abc123 0.0.0.0:8080->8080/tcp nginx:latest', 8080, image)).toBe(false)
@@ -1670,6 +1673,50 @@ describe('CVSS v3.1 vector syntax validation (phase 3)', () => {
 })
 
 describe('finish convergence (phase 3: close is a real terminal state)', () => {
+  const callerAgent = { id: 'agent-root' }
+
+  /**
+   * A fake jobs registry implementing the REAL dsh-jobs-local access
+   * contract: list(caller) returns only the caller's own and unowned jobs;
+   * wait/kill throw "belongs to another session" for foreign-owned jobs.
+   * The 0.12.9 convergence was a silent no-op precisely because the fakes
+   * here did not fence — these pin the contract the fix relies on.
+   */
+  function fencedRegistry(
+    jobs: Array<{ id: string; label: string; owner?: string }>,
+    opts: { settleOnWait?: boolean } = {},
+  ) {
+    const state = jobs.map((j) => ({ ...j, status: 'running' as string }))
+    const kills: string[] = []
+    const assertAccess = (id: string, caller?: { id?: string }): void => {
+      const job = state.find((j) => j.id === id)
+      if (job && job.owner !== undefined && job.owner !== caller?.id) {
+        throw new Error(`job ${id} belongs to another session`)
+      }
+    }
+    return {
+      kills,
+      list: (caller?: { id?: string }) =>
+        state
+          .filter((j) => j.owner === undefined || j.owner === caller?.id)
+          .filter((j) => j.status === 'running' || j.status === 'stopping')
+          .map((j) => ({ id: j.id, kind: 'strix-shell', status: j.status, label: j.label })),
+      wait: async (id: string, _ms: number, caller?: { id?: string }) => {
+        assertAccess(id, caller)
+        if (opts.settleOnWait !== false) {
+          const job = state.find((j) => j.id === id)
+          if (job) job.status = 'completed'
+        }
+      },
+      kill: (id: string, caller?: { id?: string }, reason?: string) => {
+        assertAccess(id, caller)
+        kills.push(`${id}:${reason}`)
+        const job = state.find((j) => j.id === id)
+        if (job) job.status = 'killed'
+      },
+    }
+  }
+
   async function finishTool(config: ConfigType, jobs: unknown): Promise<{ execute: (a: unknown, e: unknown) => Promise<string> }> {
     const captured: Record<string, { execute: (a: unknown, e: unknown) => Promise<string> }> = {}
     registerReport({ tools: { register: (t) => { captured[t.name] = t } }, jobs } as never, config)
@@ -1695,8 +1742,8 @@ describe('finish convergence (phase 3: close is a real terminal state)', () => {
   it('no live jobs: loose ends listed honestly, report-final.md frozen', async () => {
     const config = scratchConfig()
     seedLedger(config)
-    const tool = await finishTool(config, { list: () => [] })
-    const out = await tool.execute(finishArgs, {})
+    const tool = await finishTool(config, fencedRegistry([]))
+    const out = await tool.execute(finishArgs, { agent: callerAgent })
     expect(out).toMatch(/Engagement closed/)
     expect(out).toMatch(/1 needs_follow_up, 1 blocked/)
     const md = readFileSync(join(config.workspaceDir, 'report.md'), 'utf8')
@@ -1707,35 +1754,47 @@ describe('finish convergence (phase 3: close is a real terminal state)', () => {
     expect(existsSync(join(config.workspaceDir, 'report-final.md'))).toBe(true)
   })
 
-  it('a job that settles within the budget is not killed', async () => {
+  it('converges the CALLER-OWNED job through the registry fence (regression: caller-less list was a silent no-op)', async () => {
     const config = scratchConfig()
-    let running = true
-    const kills: string[] = []
-    const jobs = {
-      list: () => (running ? [{ id: 'strix-shell-1', kind: 'strix-shell', status: 'running', label: 'nmap scan' }] : []),
-      wait: async () => { running = false },
-      kill: (id: string, _c: unknown, reason: string) => { kills.push(`${id}:${reason}`) },
-    }
-    const tool = await finishTool(config, jobs)
-    const out = await tool.execute(finishArgs, {})
-    expect(kills).toHaveLength(0)
+    // The job is owned by the finishing agent — list(caller) must see it.
+    const registry = fencedRegistry([{ id: 'strix-shell-1', label: 'root nmap scan', owner: 'agent-root' }])
+    const tool = await finishTool(config, registry)
+    const out = await tool.execute(finishArgs, { agent: callerAgent })
+    // Settled inside the wait budget: no kill, honest accounting.
+    expect(registry.kills).toHaveLength(0)
     expect(out).toMatch(/1 settled within/)
+    const md = readFileSync(join(config.workspaceDir, 'report.md'), 'utf8')
+    expect(md).toContain("1 of this caller's strix-shell job(s) live")
   })
 
-  it('a straggler past the budget is killed with a stated reason', async () => {
+  it('kills a caller-owned straggler past the wait budget with a stated reason', async () => {
     const config = scratchConfig()
-    const kills: string[] = []
-    const jobs = {
-      list: () => [{ id: 'strix-shell-2', kind: 'strix-shell', status: 'running', label: 'slow nuclei' }],
-      wait: async () => { throw new Error('timeout') },
-      kill: (id: string, _c: unknown, reason: string) => { kills.push(`${id}:${reason}`) },
-    }
-    const tool = await finishTool(config, jobs)
-    const out = await tool.execute(finishArgs, {})
-    expect(kills).toEqual(['strix-shell-2:engagement finish convergence'])
+    // settleOnWait: false — the job never settles, so the kill pass runs.
+    const registry = fencedRegistry([{ id: 'strix-shell-2', label: 'slow nuclei', owner: 'agent-root' }], { settleOnWait: false })
+    const tool = await finishTool(config, registry)
+    const out = await tool.execute(finishArgs, { agent: callerAgent })
+    expect(registry.kills).toEqual(['strix-shell-2:engagement finish convergence'])
     expect(out).toMatch(/killed/)
     const md = readFileSync(join(config.workspaceDir, 'report.md'), 'utf8')
     expect(md).toContain('- killed: slow nuclei')
+  })
+
+  it('reports OTHER-OWNED live jobs honestly instead of claiming empty convergence', async () => {
+    const config = scratchConfig()
+    // A background shell an operator CHILD started: owned by another agent,
+    // invisible to the root's list(caller), present in the plugin's own
+    // bookkeeping. Finish must name it, not claim "no live jobs".
+    const registry = fencedRegistry([{ id: 'strix-shell-3', label: 'child subdomain spray', owner: 'agent-child-7' }])
+    const lines = await convergeJobsAtFinish(
+      { jobs: registry } as never,
+      callerAgent,
+      200,
+      [{ id: 'strix-shell-3', label: 'child subdomain spray', ownerAgentId: 'agent-child-7' }],
+    )
+    expect(lines.join('\n')).toMatch(/NOT convergable/)
+    expect(lines.join('\n')).toMatch(/agent-child-7/)
+    expect(lines.join('\n')).toMatch(/child subdomain spray/)
+    expect(registry.kills).toHaveLength(0)
   })
 
   it('refreshes a stale SARIF sidecar at close', async () => {
@@ -1746,8 +1805,8 @@ describe('finish convergence (phase 3: close is a real terminal state)', () => {
       description: 'd', evidence: 'e', created_at: 't0',
     }), 'utf8')
     writeFileSync(join(config.workspaceDir, 'findings.sarif'), 'stale', 'utf8')
-    const tool = await finishTool(config, { list: () => [] })
-    const out = await tool.execute(finishArgs, {})
+    const tool = await finishTool(config, fencedRegistry([]))
+    const out = await tool.execute(finishArgs, { agent: callerAgent })
     expect(out).toMatch(/SARIF refreshed/)
     const sarif = JSON.parse(readFileSync(join(config.workspaceDir, 'findings.sarif'), 'utf8'))
     expect(sarif.version).toBe('2.1.0')
@@ -1755,9 +1814,9 @@ describe('finish convergence (phase 3: close is a real terminal state)', () => {
 
   it('second finish is still rejected (idempotent close)', async () => {
     const config = scratchConfig()
-    const tool = await finishTool(config, { list: () => [] })
-    await tool.execute(finishArgs, {})
-    const out2 = await tool.execute(finishArgs, {})
+    const tool = await finishTool(config, fencedRegistry([]))
+    await tool.execute(finishArgs, { agent: callerAgent })
+    const out2 = await tool.execute(finishArgs, { agent: callerAgent })
     expect(out2).toMatch(/already closed/)
   })
 })

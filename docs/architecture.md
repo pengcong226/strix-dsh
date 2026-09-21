@@ -4,8 +4,8 @@
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| dsh CLI（运行时） | **0.1.5-rc.2** | 开发基线（2026-09-12 自 0.1.2-alpha.5 升级；0.12.2 补齐拆分服务包直接依赖，139 测试绿 + 新 dsh 真机加载验证），经 `npx @deepseek-ai/dsh@0.1.5-rc.2` 调用 |
-| @deepseek-ai/dsh-* 全系（tools/agent/jobs/skill/system-prompt 等 13 包） | **0.1.5-rc.2** | 与运行时实际携带的副本对齐（0.12.2 起拆分服务包全部钉精确版本直接依赖） |
+| dsh CLI（运行时） | **0.1.5-rc.2 / 0.1.6-alpha.2** | 开发基线 rc.2（2026-09-12 升级实测）；0.12.8/0.12.10 起 peer 三版本范围同时兼容 0.1.6-alpha.1/alpha.2（alpha.2 删除桌面 peer 硬校验改运行时 moduleFallback 解析，CLI 与桌面真机注册行均验证），经 `npx @deepseek-ai/dsh@0.1.5-rc.2`（或 `@0.1.6-alpha.2`）调用 |
+| @deepseek-ai/dsh-* 全系（tools/agent/jobs/skill/system-prompt 等 13 包） | **0.1.5-rc.2 \|\| 0.1.6-alpha.1 \|\| 0.1.6-alpha.2**（peer 范围） | devDeps 钉 0.1.6-alpha.2 做类型检查；运行时由宿主 moduleFallback 提供实例（0.12.10 起 alpha.2 不再校验 peer 版本，范围准确性转为维护者自律） |
 | @deepseek-ai/cordis | ^4.0.2 | |
 | @deepseek-ai/schemastery | ^3.18.2 | |
 
@@ -70,7 +70,7 @@ Strix 的 coverage/notes/threat_model 是共享可变台账。StriX-DH v1 用 **
 ```sh
 cd packages/strix-tools && npm install && npm run build
 dsh plugin --profile web add ./packages/strix-tools   # 装进 web profile
-npx -y @deepseek-ai/dsh@0.1.5-rc.2 web --no-open > dsh-boot.log 2>&1
+npx -y @deepseek-ai/dsh@0.1.5-rc.2 web --no-open > dsh-boot.log 2>&1   # 或 @0.1.6-alpha.2（0.12.10 验证）
 # 启动日志第一行应为: [strix-dsh-tools] registered 16 tool modules
 # WebUI: http://127.0.0.1:3080/?token=<启动日志中的token>
 ```

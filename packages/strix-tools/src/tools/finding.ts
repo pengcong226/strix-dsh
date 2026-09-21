@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
+import { listTrackedShellJobs } from '../lib/jobs.js'
 import { nextIdAmong, nextSequentialId, safeId, safeWorkspacePath, workspaceDir, workspaceSub, writeExclusive, writeFileAtomic } from '../lib/util.js'
 import { maskTestAccount, readAuthorization } from './authorization.js'
 import { readLedger } from './coverage.js'
@@ -628,16 +629,31 @@ export function missingFinishSections(args: Record<string, unknown>): string[] {
 }
 
 /**
- * Convergence pass at engagement close (roadmap phase 3): live strix-shell
- * jobs get a bounded wait to settle, stragglers are killed with a stated
- * reason, and the outcome is reported verbatim — close must never silently
- * claim convergence it did not perform. Registry failures degrade to a
- * noted skip rather than blocking the close.
+ * Convergence pass at engagement close (roadmap phase 3): the caller's live
+ * strix-shell jobs get a bounded wait to settle, stragglers are killed with a
+ * stated reason, and the outcome is reported verbatim — close must never
+ * silently claim convergence it did not perform.
+ *
+ * The registry fences access by CALLER: `list(caller)` returns only the
+ * caller's own (and unowned) jobs, and `wait`/`kill` throw "belongs to
+ * another session" for anything else. Calling these without a caller made
+ * convergence a silent no-op (list() returned only unowned jobs while every
+ * strix-shell job is owned) — the caller is therefore threaded through from
+ * the tool execution context, and jobs this process started but the caller
+ * cannot see (owned by OTHER agents, e.g. operator children) are reported
+ * honestly via the plugin's own bookkeeping instead of being claimed
+ * converged. Registry failures degrade to a noted skip rather than blocking
+ * the close.
  */
-export async function convergeJobsAtFinish(ctx: Context, waitBudgetMs: number): Promise<string[]> {
+export async function convergeJobsAtFinish(
+  ctx: Context,
+  caller: { id?: string } | undefined,
+  waitBudgetMs: number,
+  tracked: Array<{ id: string; label: string; ownerAgentId?: string }> = listTrackedShellJobs(),
+): Promise<string[]> {
   type LiveJob = { id: string; label: string }
   const snapshot = (): LiveJob[] => {
-    const jobs = ctx.jobs.list() as Array<{ id: string; kind: string; status: string; label: string }>
+    const jobs = ctx.jobs.list(caller as never) as Array<{ id: string; kind: string; status: string; label: string }>
     return jobs
       .filter((j) => j.kind === 'strix-shell' && (j.status === 'running' || j.status === 'stopping'))
       .map((j) => ({ id: j.id, label: j.label }))
@@ -648,11 +664,13 @@ export async function convergeJobsAtFinish(ctx: Context, waitBudgetMs: number): 
   } catch {
     return ['(job registry unavailable — convergence skipped; unknown strix-shell jobs may still be running)']
   }
-  if (live.length === 0) return []
+  const visibleIds = new Set(live.map((j) => j.id))
+  const foreign = tracked.filter((t) => !visibleIds.has(t.id))
+  if (live.length === 0 && foreign.length === 0) return []
   const deadline = Date.now() + Math.max(0, waitBudgetMs)
   for (const j of live) {
     try {
-      await ctx.jobs.wait(j.id as never, Math.max(100, deadline - Date.now()))
+      await ctx.jobs.wait(j.id as never, Math.max(100, deadline - Date.now()), caller as never)
     } catch {
       /* a wait that errors falls through to the kill pass below */
     }
@@ -664,15 +682,20 @@ export async function convergeJobsAtFinish(ctx: Context, waitBudgetMs: number): 
     still = live
   }
   const lines = [
-    `Jobs at close: ${live.length} live strix-shell job(s) — ${live.length - still.length} settled within ${waitBudgetMs}ms, ${still.length} killed.`,
+    `Jobs at close: ${live.length} of this caller's strix-shell job(s) live — ${live.length - still.length} settled within ${waitBudgetMs}ms, ${still.length} killed.`,
   ]
   for (const j of still) {
     try {
-      ctx.jobs.kill(j.id as never, undefined, 'engagement finish convergence')
+      ctx.jobs.kill(j.id as never, caller as never, 'engagement finish convergence')
       lines.push(`- killed: ${j.label}`)
     } catch {
       lines.push(`- kill FAILED for: ${j.label} (verify no container is still running)`)
     }
+  }
+  for (const t of foreign) {
+    lines.push(
+      `- NOT convergable: "${t.label}" (job ${t.id}) is owned by another agent (${t.ownerAgentId ?? 'unknown'}) — the registry fences cross-agent kills by design. Ask its owner or the operator to stop it; do not treat the engagement as fully closed while it runs.`,
+    )
   }
   return lines
 }
@@ -686,8 +709,10 @@ export function registerReport(ctx: Context, config: ConfigType) {
         + 'executive summary, per-finding sections with evidence and hash-stamped evidence_refs, reviewed-and-clean surfaces, and methodology note. '
         + 'action=sarif instead emits a SARIF 2.1.0 sidecar (workspace/findings.sarif) for CI code-scanning upload. '
         + 'action=finish closes the engagement with the four required executive sections — root/orchestrator only '
-        + '(operator children report back via send_message instead). Close is a real convergence: live strix-shell jobs '
-        + 'are settled or killed, remaining needs_follow_up/blocked surfaces are listed honestly in the close section, '
+        + '(operator children report back via send_message instead). Close is a real convergence: YOUR live '
+        + 'strix-shell jobs are settled or killed (the jobs registry fences access by caller, so jobs other agents '
+        + 'started are reported as not-convergable with their owners named — stop them before treating the close '
+        + 'as final), remaining needs_follow_up/blocked surfaces are listed honestly in the close section, '
         + 'a frozen report-final.md copy is written, and a stale SARIF sidecar is refreshed.',
       parameters: {
         action: { type: 'string', description: 'report (default) | sarif | finish.' },
@@ -704,7 +729,7 @@ export function registerReport(ctx: Context, config: ConfigType) {
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value as string }],
       },
-      async execute(raw: Record<string, unknown>): Promise<string> {
+      async execute(raw: Record<string, unknown>, exec?: { agent?: { id?: string } }): Promise<string> {
         const args = raw as unknown as {
           action?: string; engagement_title?: string; scope_summary?: string; sarif_file?: string
           caller_role?: string; executive_summary?: string; methodology?: string
@@ -748,9 +773,11 @@ export function registerReport(ctx: Context, config: ConfigType) {
             return 'REJECTED: this engagement is already closed (report.md has an Engagement Close section). '
               + 'Amend report.md directly if the close needs changes — finish appends exactly once.'
           }
-          // Convergence (phase 3): settle or kill live jobs, and account for
-          // honestly-open work — a close that hides loose ends is not a close.
-          const convergence = await convergeJobsAtFinish(ctx, config.finishJobWaitMs)
+          // Convergence (phase 3): settle or kill the caller's live jobs, and
+          // account for honestly-open work — a close that hides loose ends is
+          // not a close. The caller threads through so the registry's
+          // owner-fence sees this agent's own jobs (no-caller was a no-op).
+          const convergence = await convergeJobsAtFinish(ctx, exec?.agent, config.finishJobWaitMs)
           const ledger = readLedger(config)
           const needsFollowUp = ledger.filter((e) => e.outcome === 'needs_follow_up')
           const blocked = ledger.filter((e) => e.outcome === 'blocked')

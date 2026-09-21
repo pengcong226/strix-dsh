@@ -319,12 +319,12 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
               const path = join(dir, `${sessionName}-${Date.now()}.png`)
               await page.screenshot({ path, fullPage: args.full_page ?? false })
               const text = `Screenshot saved: ${path} (view it with the read_image tool).`
-              return budgetGate.over ? `${budgetGate.message}\n${text}` : text
+              return withNotes(budgetGate.over ? `${budgetGate.message}\n${text}` : text)
             }
             case 'content': {
               const html = await page.content()
               const text = truncate(html, 20_000)
-              return budgetGate.over ? `${budgetGate.message}\n${text}` : text
+              return withNotes(budgetGate.over ? `${budgetGate.message}\n${text}` : text)
             }
             default:
               return `Unknown action "${args.action}". Use navigate | click | fill | evaluate | screenshot | content | close.`

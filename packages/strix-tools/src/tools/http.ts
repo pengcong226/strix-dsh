@@ -35,7 +35,8 @@ interface HttpResult {
   saved_to?: string
 }
 
-export function parseRawRequest(raw: string): { url?: string; method: string; headers: Record<string, string>; body?: string } {  const normalized = raw.replace(/\r\n/g, '\n')
+export function parseRawRequest(raw: string): { url?: string; method: string; headers: Record<string, string>; body?: string } {
+  const normalized = raw.replace(/\r\n/g, '\n')
   const splitAt = normalized.indexOf('\n\n')
   const head = splitAt === -1 ? normalized : normalized.slice(0, splitAt)
   const body = splitAt === -1 ? undefined : normalized.slice(splitAt + 2)
@@ -415,7 +416,9 @@ export function registerHttp(ctx: Context, config: ConfigType) {
           type: 'string',
           description:
             'Complete raw HTTP request text (e.g. from captured traffic): request line, headers, blank line, body. '
-            + 'Overrides url/method/headers/body. Use an absolute-form request line or a Host header.',
+            + 'Overrides url/method/headers/body. Use an absolute-form request line or a Host header. '
+            + 'NOTE: a Host-form (non-absolute) request line replays over PLAIN http:// by default — for an HTTPS '
+            + 'capture, use an absolute-form request line (GET https://host/path HTTP/1.1).',
         },
         follow_redirects: { type: 'boolean', description: 'Follow 3xx redirects. Default true.' },
         timeout_ms: { type: 'number', description: 'Request timeout in milliseconds. Default from plugin config.' },

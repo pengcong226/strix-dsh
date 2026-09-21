@@ -69,6 +69,23 @@ export function jobLabel(command: string): string {
 }
 
 /**
+ * Live strix-shell jobs this process started, for finish convergence
+ * accounting. The dsh jobs registry fences list/kill by the CALLING agent
+ * (an agent sees only its own jobs), so a root calling strix_report finish
+ * cannot even SEE the background shells its operator children left running
+ * through ctx.jobs alone. This map is process-wide (all agents share one
+ * plugin instance), records every job we started with its owner, and drops
+ * the entry when the job settles — finish can then report other-owned live
+ * jobs honestly instead of claiming an empty convergence.
+ */
+const trackedShellJobs = new Map<string, { label: string; ownerAgentId?: string }>()
+
+/** Live (unsettled) strix-shell jobs started by this process, with owners. Pure. */
+export function listTrackedShellJobs(): Array<{ id: string; label: string; ownerAgentId?: string }> {
+  return [...trackedShellJobs.entries()].map(([id, t]) => ({ id, ...t }))
+}
+
+/**
  * Start a background shell job. The approval gate must already have granted
  * this command — this function executes unconditionally.
  *
@@ -191,6 +208,12 @@ export function startBackgroundShell(
         },
       }
     },
+  })
+  // Bookkeeping for finish convergence (see trackedShellJobs): record the
+  // job with its owner, drop it once settled. `done` never rejects.
+  trackedShellJobs.set(String(id), { label: jobLabel(spec.command), ownerAgentId: agent?.id })
+  void done.then(() => {
+    trackedShellJobs.delete(String(id))
   })
   return id as string
 }
