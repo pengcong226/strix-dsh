@@ -105,3 +105,11 @@ copy cordis.patch.yml package.json icon.svg "%RT%/"
 
 - 旧 `.desktop-build`（锁死）与新构建根 `C:/Users/20327/AppData/Local/dsh17-desktop-build`（含 win-unpacked 成品）并存；前者重启后可删。
 - 回滚：程序目录换回 `DeepSeekHarness-016-bak`；profile patch 的 `preset-strix` 行留着即可（守卫在 0.1.6 上自动禁用）；目录预设从仓库恢复；插件无需降级（0.13.0 双兼容）。
+
+### 升级后事故（2026-09-23 晚，已修复）：发消息全败 "format v4 message requires a producer-owned source kind"
+
+**根因**：`@openviking/dsh-memory-plugin@0.3.2`（第三方，profile bundles 全局挂载）注入 openviking-context 用户消息用的 `source: { kind: "plugin", ... }` 是 V4 明令拒绝的"退役包装"（V4 校验：source.kind 必须非空且 ≠ 'plugin'，未知 kind 予以保留）。每个会话每轮都注入 → 换会话换模型全部失败。这正是交接清单第 4/5 条"插件需适配"点名 @openviking 插件要查而升级时只核了 strix 侧的原因——strix-dsh-tools 不自产用户消息（approval.request 走宿主管道）故不受影响。
+
+**修复**（就地补丁 profile node_modules 副本，4 处）：`runtime.mjs` 的 `pluginMessage()` 改 `kind: "openviking-memory"`（producer-owned，plugin/form 字段保留）；`runtime.mjs` `isStartupProfile()` 检测同步改；`capture.mjs` 的捕获白名单跳过与 `promptText()` 过滤同步改（防插件自采自建回环）。**注意：该修复只存在于已安装副本——插件源码仓库需同步此改动，否则下次更新/重装即回退。**
+
+**验证**：重启后向 strix 测试会话实发一条消息——prompt 接受 → 插件注入两条 `kind=openviking-memory` 消息成功入账 V4 日志（seq 12/13）→ request 构建 → 模型回复 → turn/end 完整闭环（20:37–20:39 实录）。
