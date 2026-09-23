@@ -113,3 +113,5 @@ copy cordis.patch.yml package.json icon.svg "%RT%/"
 **修复**（就地补丁 profile node_modules 副本，4 处）：`runtime.mjs` 的 `pluginMessage()` 改 `kind: "openviking-memory"`（producer-owned，plugin/form 字段保留）；`runtime.mjs` `isStartupProfile()` 检测同步改；`capture.mjs` 的捕获白名单跳过与 `promptText()` 过滤同步改（防插件自采自建回环）。**注意：该修复只存在于已安装副本——插件源码仓库需同步此改动，否则下次更新/重装即回退。**
 
 **验证**：重启后向 strix 测试会话实发一条消息——prompt 接受 → 插件注入两条 `kind=openviking-memory` 消息成功入账 V4 日志（seq 12/13）→ request 构建 → 模型回复 → turn/end 完整闭环（20:37–20:39 实录）。
+
+**后续（同日晚）**：上游当天已发布 `@openviking/dsh-memory-plugin@0.5.2`（09-23 10:08 UTC，0.4.3→0.5.2 四连发），官方修复与本补丁同思路——kind 改为 `plugin:openviking-memory`（producer-owned），并对旧 `plugin` kind 双兼容。已升级到官方 0.5.2（外科手术式替换 profile node_modules 副本 + manifest 改 `^0.5.2`；**勿在 profile 目录跑全量 install**——manifest 里 strix-dsh-tools 仍写 0.12.11 而 0.13.0 未发 npm，全量安装会用 npm 旧版覆盖本地副本），实测 `kind=plugin:openviking-memory` 入账 + 整轮闭环（20:47 实录）。本地临时补丁已被官方版取代。
