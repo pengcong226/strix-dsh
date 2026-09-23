@@ -1,0 +1,136 @@
+diff --git a/apps/desktop/scripts/desktop-build-paths.mjs b/apps/desktop/scripts/desktop-build-paths.mjs
+index 841da2c4ba..b1f00fdca2 100644
+--- a/apps/desktop/scripts/desktop-build-paths.mjs
++++ b/apps/desktop/scripts/desktop-build-paths.mjs
+@@ -3,7 +3,13 @@
+ import { join, resolve } from 'node:path'
+ 
+ const APP_ROOT = resolve(import.meta.dirname, '..')
+-const BUILD_ROOT = join(APP_ROOT, '.desktop-build')
++// Local-build override: an external holder (AV scan, workspace indexer) can
++// lock files inside the default .desktop-build tree and block both cleanup
++// and repackaging. DSH_DESKTOP_BUILD_ROOT redirects the whole mutable build
++// tree (including the downloads cache) to a fresh directory instead.
++const BUILD_ROOT = process.env.DSH_DESKTOP_BUILD_ROOT
++  ? resolve(process.env.DSH_DESKTOP_BUILD_ROOT)
++  : join(APP_ROOT, '.desktop-build')
+ const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
+ 
+ /**
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index 2cee72d23d..96197af35f 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -101,7 +101,12 @@ export function createElectronBuilderConfig(
+     protocols: [{ name: 'DeepSeek Harness', schemes: ['dsh'] }],
+     extraMetadata: {
+       dshDesktopAppId: appId,
+-      dshMandatoryUpdatePolicy: policy,
++      // Self-built unsigned deployment: the mandatory-update policy is
++      // deliberately NOT baked into the manifest. resolveDesktopPolicyEnvironment
++      // still validates the env at config load, and beforePack still validates
++      // the resolved shape, but the packaged app sees no policy and boots
++      // without the feishu-test gate (which an unsigned local build can never
++      // pass, and which manifests as the full-screen blur modal).
+       ...buildVersion === productVersion ? {} : { version: buildVersion },
+       ...packaged === undefined ? {} : { dshBuildCommit: packaged.commit, dshBuildDirty: packaged.dirty },
+     },
+diff --git a/apps/desktop/scripts/prepare-dsh.ts b/apps/desktop/scripts/prepare-dsh.ts
+index a89247ad18..363ba52ff3 100644
+--- a/apps/desktop/scripts/prepare-dsh.ts
++++ b/apps/desktop/scripts/prepare-dsh.ts
+@@ -90,6 +90,13 @@ function runPnpm(args: readonly string[]): Promise<void> {
+         ...Object.fromEntries(Object.entries(process.env).filter(([name]) => (
+           name !== 'NODE_OPTIONS' && name !== 'NODE_PATH' && !/^DSH_DESKTOP_/u.test(name) && !/^(?:npm|pnpm|corepack)_/iu.test(name)
+         ))),
++        // Proxy passthrough: the bundled pnpm must still reach the registry to
++        // install native modules (sharp/koffi/node-pty/fs-ext); on networks
++        // where registry.npmjs.org is only reachable through a local proxy,
++        // stripping these would silently produce a payload without them.
++        ...Object.fromEntries(Object.entries(process.env).filter(([name]) =>
++          /^(?:https?_proxy|HTTPS?_PROXY|ALL_PROXY|all_proxy|NO_PROXY|no_proxy)$/.test(name)
++        )),
+         NPM_CONFIG_REGISTRY: registry,
+         NPM_CONFIG_STORE_DIR: STORE_ROOT,
+         NPM_CONFIG_USERCONFIG: userConfig,
+@@ -121,6 +128,18 @@ async function main(): Promise<void> {
+       copyFileSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGE_SET_FILE), join(BUILD_ROOT, DESKTOP_PACKAGE_SET_FILE))
+       cpSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGES_DIR), join(BUILD_ROOT, DESKTOP_PACKAGES_DIR), { recursive: true })
+       createRuntimeProjectMetadata(BUILD_ROOT, release)
++      // Windows payload fix: the runtime's file-policy allowlist still admits
++      // fs-ext's build artifacts (fs_ext.node et al.), but no package in the
++      // closure declares it, so the resolved lockfile omits it and the payload
++      // ships without it. Keep the declaration in the staged project so the
++      // runtime install resolves it; drop this if a future release declares
++      // fs-ext itself (the install step will then fail on a duplicate).
++      {
++        const manifestPath = join(BUILD_ROOT, 'package.json')
++        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dependencies: Record<string, string> }
++        manifest.dependencies['fs-ext'] = '^2.1.1'
++        writeFileSync(manifestPath, JSON.stringify(manifest, undefined, 2) + '\n', { mode: 0o600 })
++      }
+     })
+     await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:lockfile', () => runPnpm(['install', '--lockfile-only']))
+     verifyDesktopCoreLockfile(
+diff --git a/apps/desktop/scripts/prepare-package-set.ts b/apps/desktop/scripts/prepare-package-set.ts
+index 7e7d62eea2..946597bc75 100644
+--- a/apps/desktop/scripts/prepare-package-set.ts
++++ b/apps/desktop/scripts/prepare-package-set.ts
+@@ -88,7 +88,7 @@ export function selectDesktopPackageClosure(
+ }
+ 
+ function packedManifest(tarball: string): Record<string, unknown> {
+-  const value: unknown = JSON.parse(capture('tar', ['-xOzf', tarball, 'package/package.json']))
++  const value: unknown = JSON.parse(capture('tar', ['--force-local', '-xOzf', tarball, 'package/package.json']))
+   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+     throw new Error(`desktop package set: ${tarball} has no package manifest`)
+   }
+diff --git a/apps/desktop/scripts/windows-directory-installer.mjs b/apps/desktop/scripts/windows-directory-installer.mjs
+index 0f2f985142..a557072b76 100644
+--- a/apps/desktop/scripts/windows-directory-installer.mjs
++++ b/apps/desktop/scripts/windows-directory-installer.mjs
+@@ -2,6 +2,7 @@
+ import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+ import { createRequire } from 'node:module'
+ import { dirname, join } from 'node:path'
++import { desktopTargetBuildPaths } from './desktop-build-paths.mjs'
+ 
+ const require = createRequire(import.meta.url)
+ const templates = join(dirname(require.resolve('app-builder-lib/package.json')), 'templates/nsis')
+@@ -80,7 +81,13 @@ export function installWindowsDirectoryInstaller() {
+     const uninstaller = join(directory, 'uninstaller.nsh')
+     await writeFile(uninstaller, directoryUninstaller(await readFile(join(templates, 'uninstaller.nsh'), 'utf8')))
+     adapted = replaceOnce(adapted, '!include "uninstaller.nsh"', `!include "${uninstaller}"`)
+-    return `!define DSH_UPDATER_CACHE_NAME "${this.packager.appInfo.updaterCacheDirName}"\n!define DSH_SEVENZIP_PATH "${tool}"\n!define DSH_SEVENZIP_LICENSE_DIR "${dirname(dirname(sourceTool))}"\n${await compute.call(this, adapted, ...args)}`
++    // installer.nsh's own define hardcodes the default build root; this
++    // prepended define wins through its /ifndef guard and follows
++    // DSH_DESKTOP_BUILD_ROOT when the default tree is locked aside. Guarded
++    // because computeFinalScript runs for both the installer and the
++    // uninstaller passes over the same script.
++    const installerUi = join(desktopTargetBuildPaths('win-x64').root, 'installer-ui')
++    return `!define /ifndef INSTALLER_BUILD_DIR "${installerUi}"\n!define DSH_UPDATER_CACHE_NAME "${this.packager.appInfo.updaterCacheDirName}"\n!define DSH_SEVENZIP_PATH "${tool}"\n!define DSH_SEVENZIP_LICENSE_DIR "${dirname(dirname(sourceTool))}"\n${await compute.call(this, adapted, ...args)}`
+   }
+ }
+ 
+diff --git a/scripts/publish-npm-baseline.ts b/scripts/publish-npm-baseline.ts
+index 31309b55d8..e847d5b817 100644
+--- a/scripts/publish-npm-baseline.ts
++++ b/scripts/publish-npm-baseline.ts
+@@ -769,7 +769,7 @@ interface InspectedTarball {
+ 
+ function inspectTarball(path: string, runner: CommandRunner): InspectedTarball {
+   const manifest: unknown = JSON.parse(
+-    runner.capture('tar', ['-xOf', path, 'package/package.json'], dirname(path)),
++    runner.capture('tar', ['--force-local', '-xOf', path, 'package/package.json'], dirname(path)),
+   )
+   if (!isRecord(manifest)) throw new Error(`${path} contains an invalid package.json`)
+   return {
+@@ -777,7 +777,7 @@ function inspectTarball(path: string, runner: CommandRunner): InspectedTarball {
+     version: expectString(manifest, 'version', path),
+     private: manifest.private,
+     manifest,
+-    files: runner.capture('tar', ['-tf', path], dirname(path)).split(/\r?\n/),
++    files: runner.capture('tar', ['--force-local', '-tf', path], dirname(path)).split(/\r?\n/),
+   }
+ }
+ 

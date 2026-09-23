@@ -1,7 +1,9 @@
 # 桌面端升级 0.1.6-alpha.2 → 0.1.7-alpha.2：插件与预设侧迁移手册
 
+> **执行状态：已完成（2026-09-23）**——实录见文末「附录：升级实录」。
+>
 > 适用场景：DeepSeek Harness 桌面端（自建）升级到 dsh 0.1.7-alpha.2 运行时之后，strix-dsh-tools 0.13.0 的部署与验证。
-> 桌面**构建**本身（8 处补丁、`.env.windows`、强制更新策略第 7 补丁等）不在本文范围——见 `C:/Users/20327/Documents/dsh/DSH-0.1.7-升级交接清单.md`（2026-09-23 内核查，含补丁可打性逐条盘点）。
+> 桌面**构建**本身（补丁、`.env.windows`、强制更新策略第 7 补丁等）不在本文范围——见 `C:/Users/20327/Documents/dsh/DSH-0.1.7-升级交接清单.md`（2026-09-23 内核查，含补丁可打性逐条盘点）；实际落地的 6 处构建补丁已归档为 `docs/desktop-upstream-patches-0.1.7-alpha.2.diff`（0.1.6 时代旧补丁另存 `desktop-upstream-patches-0.1.6-alpha.2.diff`）。
 > 插件侧适配的设计依据见 docs/DEVELOPMENT.md 0.13.0 版本条目；预设双形态机制见 presets/README.md。
 
 ## 0. 升级前（一次性，防数据损失）
@@ -64,3 +66,42 @@ copy cordis.patch.yml package.json icon.svg "%RT%/"
 - profile patch：删掉第 2 步追加的 `preset-strix` 行（0.1.6 不认识 `@deepseek-ai/dsh-agent-preset`，但守卫会自动禁用该行——留着也不炸 boot，清理只为干净）。
 - 目录预设：从仓库 `presets/strix/` 重新拷贝到 `~/.dsh/.agent-presets/`。
 - 插件副本：0.13.0 在 0.1.6 桌面上同样工作（jobs 双方言 + 守卫），无需降级；若要降回 0.12.11，按同一路径覆盖三副本即可。
+
+## 附录：升级实录（2026-09-23 执行）
+
+### 构建侧（dsh-upstream @ dsh-v0.1.7-alpha.2，6 处补丁）
+
+交接清单预判的 4 处补丁全部落地，另因两个现场问题新增 2 处：
+
+| # | 文件 | 内容 | 来源 |
+|---|---|---|---|
+| 1 | `apps/desktop/scripts/prepare-package-set.ts` | tar `--force-local`（1 处） | 清单 §2.3 |
+| 2 | `scripts/publish-npm-baseline.ts` | tar `--force-local`（2 处） | 清单 §2.2 |
+| 3 | `apps/desktop/scripts/prepare-dsh.ts` | runPnpm 代理透传 + fs-ext 声明（0.1.7 新结构重排） | 清单 §2.4 |
+| 4 | `apps/desktop/scripts/electron-builder-config.mjs` | extraMetadata 删 `dshMandatoryUpdatePolicy`（第 7 补丁） | 清单 §3.3 |
+| 5 | `apps/desktop/scripts/desktop-build-paths.mjs` | **新增**：`DSH_DESKTOP_BUILD_ROOT` 环境变量覆盖构建根 | 现场问题① |
+| 6 | `apps/desktop/scripts/windows-directory-installer.mjs` | **新增**：前置 `!define /ifndef INSTALLER_BUILD_DIR`（走覆盖逻辑） | 现场问题① |
+
+`.env.windows` 追加两行：`DSH_DESKTOP_NPM_REGISTRY=https://registry.npmmirror.com`（替代旧 npmmirror 代码补丁）+ `DSH_DESKTOP_MANDATORY_UPDATE_CONFIG={"allowedAuthOrigins":["https://harness-test.deepseek.com"]}`（**0.1.7 新要求**：test 部署策略校验强制非空 allowedAuthOrigins，缺失在构建早期 throw——交接清单未覆盖此点）。
+
+**现场问题①：`.desktop-build` 被锁**。构建失败排查中发现 asar 文件被本机 ZCode 宿主进程（工作区文件索引器）持锁，clean/删除/改名全部 EBUSY/Permission denied。解法 = 补丁 5+6：把整个构建树重定向到工作区外的 `C:/Users/20327/AppData/Local/dsh17-desktop-build`（放工作区内会被再次索引锁死）。旧 `.desktop-build` 目录留待重启后删除。
+
+**现场问题②：孤儿 node_modules**。0.1.6→0.1.7 上游删除/改名了 12 个包（code-runtime×2、e2b×3、agent-presets、settings-file、tool-present、workflow-worker-thread、code-runtime-python、agent-team-web-profile、ui-settings-unarchive-sessions），`git checkout` 后各剩一个孤儿 `node_modules/` 目录——tsdown 的 workspace 发现按目录 glob 误认其为成员，套用根默认配置后在无 `lib/types` 处抛 `Cannot find entry`。**未来任何一次跨版本 checkout 后都要清一次孤儿目录**（判据：`packages/*/*` 下无 `package.json` 的目录）。
+
+**NSIS 安装包未产出（有意）**：NSIS 自定义脚本链（customCheckAppRunning → installer-ui DLL）在补丁 6 后仍有宏冲突，且部署模型本就是 win-unpacked 目录替换——直接采用 electron-builder 在 NSIS 步骤**之前**已完整产出并通过校验（verifyDesktopRuntime + verifyWindowsAsarUnpack）的 `win-unpacked/`。需要安装包时再补调试。
+
+### 部署与验证结果（全部通过）
+
+1. 备份：sessions 41M → `~/.dsh-sessions-backup-20260923`；程序目录 1.6G → `DeepSeekHarness-016-bak`（另有 rc2 时代旧备份）。
+2. 替换：win-unpacked（1.2G）→ `AppData/Local/Programs/DeepSeekHarness`；manifest 实测 `dshMandatoryUpdatePolicy` **ABSENT**、`dshDesktopAppId` 保持 `com.pengcong226.strixdh.desktop`（原地升级身份）。
+3. 插件三副本：profile 副本 + runtime 副本（新布局在 `resources/app.asar.unpacked/dsh/node_modules/`——0.1.7 的 JS 包全在 asar 内，unpacked 区只放原生模块，fs-ext 在列=补丁 3 生效）均为 0.13.0。
+4. profile patch 预设行：`preset-strix` 声明行（含守卫）已加入 `~/.dsh/profiles/desktop/cordis.patch.yml` 并经 YAML 解析验证（18 行 plugins + 守卫）。
+5. 启动验证：**注册行恰好一次**（`registered 16 tool modules + methodology + authorization sections + 75 skills`）；渲染层 `dsh-desktop:mandatory-status` 无 handler 报错=无策略=**无遮罩**（补丁 4 生效）；`settings.yaml` 已改名 `.imported`（一次性导入完成）；用户既有会话自动迁移 **V4** 并可继续对话。
+6. roster 实测（web API `agentPresets/list`）：`standard(default) / ptc / minimal / cordis / strix(strix-dsh 模式)` 全部 ok 无 broken。
+7. `session/create agentPreset=strix` 在桌面端成功（sessionId 返回，预设真实可组合）。
+8. 旧目录预设 `~/.dsh/.agent-presets/strix/` 已删除（0.1.7 不读取；回滚 0.1.6 时从仓库 `presets/strix/` 恢复）。
+
+### 遗留与回滚
+
+- 旧 `.desktop-build`（锁死）与新构建根 `C:/Users/20327/AppData/Local/dsh17-desktop-build`（含 win-unpacked 成品）并存；前者重启后可删。
+- 回滚：程序目录换回 `DeepSeekHarness-016-bak`；profile patch 的 `preset-strix` 行留着即可（守卫在 0.1.6 上自动禁用）；目录预设从仓库恢复；插件无需降级（0.13.0 双兼容）。
