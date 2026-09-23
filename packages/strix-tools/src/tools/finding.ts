@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
-import { listTrackedShellJobs } from '../lib/jobs.js'
+import { jobsCaller, listTrackedShellJobs } from '../lib/jobs.js'
 import { nextIdAmong, nextSequentialId, safeId, safeWorkspacePath, workspaceDir, workspaceSub, writeExclusive, writeFileAtomic } from '../lib/util.js'
 import { maskTestAccount, readAuthorization } from './authorization.js'
 import { readLedger } from './coverage.js'
@@ -643,7 +643,8 @@ export function missingFinishSections(args: Record<string, unknown>): string[] {
  * cannot see (owned by OTHER agents, e.g. operator children) are reported
  * honestly via the plugin's own bookkeeping instead of being claimed
  * converged. Registry failures degrade to a noted skip rather than blocking
- * the close.
+ * the close. The caller FORM is dialect-dependent (Agent object on <=0.1.6,
+ * session id string on 0.1.7+) — jobsCaller() picks it.
  */
 export async function convergeJobsAtFinish(
   ctx: Context,
@@ -652,8 +653,9 @@ export async function convergeJobsAtFinish(
   tracked: Array<{ id: string; label: string; ownerAgentId?: string }> = listTrackedShellJobs(),
 ): Promise<string[]> {
   type LiveJob = { id: string; label: string }
+  const fence = (): unknown => jobsCaller(ctx, caller)
   const snapshot = (): LiveJob[] => {
-    const jobs = ctx.jobs.list(caller as never) as Array<{ id: string; kind: string; status: string; label: string }>
+    const jobs = ctx.jobs.list(fence() as never) as Array<{ id: string; kind: string; status: string; label: string }>
     return jobs
       .filter((j) => j.kind === 'strix-shell' && (j.status === 'running' || j.status === 'stopping'))
       .map((j) => ({ id: j.id, label: j.label }))
@@ -670,7 +672,7 @@ export async function convergeJobsAtFinish(
   const deadline = Date.now() + Math.max(0, waitBudgetMs)
   for (const j of live) {
     try {
-      await ctx.jobs.wait(j.id as never, Math.max(100, deadline - Date.now()), caller as never)
+      await ctx.jobs.wait(j.id as never, Math.max(100, deadline - Date.now()), fence() as never)
     } catch {
       /* a wait that errors falls through to the kill pass below */
     }
@@ -686,7 +688,7 @@ export async function convergeJobsAtFinish(
   ]
   for (const j of still) {
     try {
-      ctx.jobs.kill(j.id as never, caller as never, 'engagement finish convergence')
+      ctx.jobs.kill(j.id as never, fence() as never, 'engagement finish convergence')
       lines.push(`- killed: ${j.label}`)
     } catch {
       lines.push(`- kill FAILED for: ${j.label} (verify no container is still running)`)

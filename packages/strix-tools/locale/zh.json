@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "StriX-DH",
+    "description": "DeepSeek Harness 的授权安全测试工具套件：渗透测试工具（HTTP 客户端、沙箱 shell、Python 漏洞利用盒、浏览器自动化、侦察、SAST、证据绑定的 findings）以及 strix 预设。仅测试自己拥有或获得书面授权的目标。"
+  }
+}

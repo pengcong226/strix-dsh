@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import * as yaml from 'js-yaml'
 import type { ConfigType } from '../src/config.js'
 import { nextIdAmong, nextSequentialId, runProcess, clampTimeoutMs, safeId, safeWorkspacePath, truncate, writeExclusive, writeFileAtomic } from '../src/lib/util.js'
 import { registerBundledSkills } from '../src/skills-provider.js'
@@ -2571,5 +2572,85 @@ describe('bundled skill contract lint', () => {
     const md = readFileSync(new URL('../assets/skills/python.md', import.meta.url), 'utf8')
     expect(md).not.toMatch(/install_packages:\s*\[/)
     expect(md).toMatch(/install_packages:\s*"/)
+  })
+})
+
+// ── preset declaration consistency (0.1.7 plugin row vs 0.1.6 directory) ────
+// dsh 0.1.7 stopped reading ~/.dsh/.agent-presets directories; the preset is
+// declared by the `preset-strix` row in cordis.patch.yml through
+// @deepseek-ai/dsh-agent-preset. On <=0.1.6 that row self-disables and the
+// directory form under presets/strix/ serves instead — so the two forms
+// must carry IDENTICAL rows. This is the drift fence: edit one, the test
+// fails until the other matches.
+
+describe('preset declaration consistency', () => {
+  // The host's exact !!js dialect (vendor/include/src/index.ts): a !!js
+  // scalar parses into an opaque { __jsExpr } wrapper; equality is source
+  // text. Anything else is plain YAML.
+  const JsExpr = new yaml.Type('tag:yaml.org,2002:js', {
+    kind: 'scalar',
+    resolve: (data) => typeof data === 'string',
+    construct: (data) => ({ __jsExpr: data }),
+  })
+  const schema = yaml.JSON_SCHEMA.extend(JsExpr)
+  const parse = (url: URL): unknown =>
+    yaml.load(readFileSync(url, 'utf8'), { schema })
+
+  const eq = (a: unknown, b: unknown, path: string): void => {
+    if (a instanceof Object && a !== null && '__jsExpr' in a) {
+      expect(b, `${path}: js expression missing or different`).toMatchObject({ __jsExpr: (a as { __jsExpr: string }).__jsExpr })
+      return
+    }
+    if (Array.isArray(a) || Array.isArray(b)) {
+      expect(Array.isArray(a) && Array.isArray(b), `${path}: array vs non-array`).toBe(true)
+      expect((a as unknown[]).length, `${path}: row count`).toBe((b as unknown[]).length)
+      ;(a as unknown[]).forEach((item, i) => eq(item, (b as unknown[])[i], `${path}[${i}]`))
+      return
+    }
+    if (a instanceof Object && b instanceof Object && a !== null && b !== null) {
+      expect(Object.keys(a).sort().join(','), `${path}: keys`).toBe(Object.keys(b).sort().join(','))
+      for (const k of Object.keys(a)) eq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], `${path}.${k}`)
+      return
+    }
+    expect(a, path).toBe(b)
+  }
+
+  it('cordis.patch.yml declares preset strix with the guard, plugin row intact', () => {
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    expect(patch).toHaveLength(1)
+    const rows = patch[0]!.insert
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({ id: 'strix-tools', name: 'strix-dsh-tools' })
+    const preset = rows[1]!
+    expect(preset).toMatchObject({ id: 'preset-strix', name: '@deepseek-ai/dsh-agent-preset' })
+    const guard = preset.disabled as { __jsExpr: string }
+    expect(guard.__jsExpr).toContain("resolve('@deepseek-ai/dsh-agent-preset/package.json')")
+    expect(preset.config).toMatchObject({ id: 'strix', order: 10 })
+  })
+
+  it('preset row plugins are identical to the 0.1.6 directory form (drift fence)', () => {
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const plugins = ((patch[0]!.insert[1]!.config as Record<string, unknown>).plugins) as unknown[]
+    const directory = parse(new URL('../../../presets/strix/agent.cordis.yml', import.meta.url)) as unknown[]
+    expect(plugins.length).toBe(directory.length)
+    eq(plugins, directory, 'plugins')
+  })
+
+  it('preset.yml identity fields match the declaration row', () => {
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const cfg = patch[0]!.insert[1]!.config as Record<string, unknown>
+    const presetYml = parse(new URL('../../../presets/strix/preset.yml', import.meta.url)) as Record<string, unknown>
+    expect(cfg.name).toBe(presetYml.name)
+    expect(cfg.description).toBe(presetYml.description)
+    expect(cfg.order).toBe(presetYml.order)
+  })
+
+  it('locale metadata files parse and carry meta title/description', () => {
+    for (const locale of ['en', 'zh']) {
+      const meta = JSON.parse(readFileSync(new URL(`../locale/${locale}.json`, import.meta.url), 'utf8')) as { meta?: { title?: unknown; description?: unknown } }
+      expect(typeof meta.meta?.title).toBe('string')
+      expect((meta.meta!.title as string).length).toBeGreaterThan(0)
+      expect(typeof meta.meta?.description).toBe('string')
+    }
   })
 })

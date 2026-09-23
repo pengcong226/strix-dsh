@@ -4,8 +4,8 @@
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| dsh CLI（运行时） | **0.1.5-rc.2 / 0.1.6-alpha.2** | 开发基线 rc.2（2026-09-12 升级实测）；0.12.8/0.12.10 起 peer 三版本范围同时兼容 0.1.6-alpha.1/alpha.2（alpha.2 删除桌面 peer 硬校验改运行时 moduleFallback 解析，CLI 与桌面真机注册行均验证），经 `npx @deepseek-ai/dsh@0.1.5-rc.2`（或 `@0.1.6-alpha.2`）调用 |
-| @deepseek-ai/dsh-* 全系（tools/agent/jobs/skill/system-prompt 等 13 包） | **0.1.5-rc.2 \|\| 0.1.6-alpha.1 \|\| 0.1.6-alpha.2**（peer 范围） | devDeps 钉 0.1.6-alpha.2 做类型检查；运行时由宿主 moduleFallback 提供实例（0.12.10 起 alpha.2 不再校验 peer 版本，范围准确性转为维护者自律） |
+| dsh CLI（运行时） | **0.1.5-rc.2 / 0.1.6-alpha.2 / 0.1.7-alpha.2** | 开发基线 rc.2（2026-09-12 升级实测）；0.12.8/0.12.10 起 peer 范围兼容 0.1.6-alpha.1/alpha.2（alpha.2 删除桌面 peer 硬校验改运行时 moduleFallback 解析）；0.13.0 起四版本范围兼容 0.1.7-alpha.2（jobs API 重构 + 目录预设废除，双方言适配器 + 预设声明行双轨，0.1.6/0.1.7 两代 CLI 真机验证），经 `npx @deepseek-ai/dsh@0.1.5-rc.2`（或 `@0.1.6-alpha.2` / `@0.1.7-alpha.2`）调用 |
+| @deepseek-ai/dsh-* 全系（tools/agent/jobs/skill/system-prompt 等 13 包） | **0.1.5-rc.2 \|\| 0.1.6-alpha.1 \|\| 0.1.6-alpha.2 \|\| 0.1.7-alpha.2**（peer 范围） | devDeps 钉 0.1.7-alpha.2 做类型检查；运行时由宿主 moduleFallback 提供实例（0.12.10 起 alpha.2 不再校验 peer 版本，范围准确性转为维护者自律） |
 | @deepseek-ai/cordis | ^4.0.2 | |
 | @deepseek-ai/schemastery | ^3.18.2 | |
 

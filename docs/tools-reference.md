@@ -261,6 +261,8 @@ Authorization attestation revoked. The agent is back to passive-only until a new
 
 **后台模式**：`background=true` 时命令经审批门放行后注册为 `strix-shell-N` job（dsh 自带 `job_output`/`job_list`/`job_kill` 管理，无需插件自写）。适合长扫描：调用立即返回，模型可并行干别的，再用 `job_output` 轮询。kill 发 SIGKILL 并 `docker rm -f` 对应容器，5 秒后仍未退出则强制 settle 记录（防僵尸条目）。**后台完成会补记** `evidence/log.jsonl` 的 result 行（含 exitCode/durationMs）——长扫描路径不是审计黑洞。
 
+**输出方言（0.13.0 起双轨）**：dsh 0.1.7 重构了 jobs 注册表——输出由 registry 自有 ring 持有（插件 `job.append` 推送，400KB 生产侧截断后追加一次 `[... output truncated at 400KB ...]` 注记），`job_output` 读到的 chunk 可能因 ring 保留窗收头而带 lossy 标记（官方 bash/pwsh 后台 job 同语义）；≤0.1.6 仍是插件侧缓冲 + `readOutput()` 增量拉取（截断注记随每次读附加）。插件按 `'events' in ctx.jobs` 自动选方言，模型侧用法不变。
+
 **真实后台输出**（headless 冒烟，`echo bg-smoke-ok && sleep 2 && echo bg-done` + `background=true`）：
 
 ```

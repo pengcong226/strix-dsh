@@ -259,6 +259,8 @@ Authorization attestation revoked. The agent is back to passive-only until a new
 
 **Background mode**: with `background=true` the approved command registers as a `strix-shell-N` job (managed by dsh's own `job_output`/`job_list`/`job_kill`, no plugin-side tooling needed). Built for long scans: the call returns immediately, the model works on something else in parallel, then polls with `job_output`. Kill sends SIGKILL **and** `docker rm -f`s the recorded container; a record that still has not exited after 5 seconds is force-settled (no zombie entries). **Background completions are audited**: a result row (exitCode/durationMs) lands in `evidence/log.jsonl` — the long-scan path is not an audit hole.
 
+**Output dialect (dual-track since 0.13.0)**: dsh 0.1.7 restructured the jobs registry — output now lives in a registry-owned ring (the plugin pushes via `job.append`; after the 400KB producer-side cap a single `[... output truncated at 400KB ...]` note is appended), and chunks read by `job_output` may carry a lossy marker when the ring's retention window has trimmed the head (the same semantics as the official bash/pwsh background jobs); on ≤0.1.6 the plugin-side buffer + `readOutput()` incremental pull remains (the truncation note rides along every read). The plugin picks the dialect automatically via `'events' in ctx.jobs`; nothing changes for the model.
+
 **Real background output** (headless smoke test, `echo bg-smoke-ok && sleep 2 && echo bg-done` + `background=true`):
 
 ```

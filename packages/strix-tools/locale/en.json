@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "StriX-DH",
+    "description": "Offensive-security tool suite for the DeepSeek Harness: authorized-pentest tools (HTTP client, sandboxed shell, Python exploit box, browser automation, recon, SAST, evidence-bound findings) plus the strix agent preset. Only test targets you own or have explicit, written permission to test."
+  }
+}
