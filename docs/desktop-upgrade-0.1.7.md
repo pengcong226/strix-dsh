@@ -67,7 +67,14 @@ copy cordis.patch.yml package.json icon.svg "%RT%/"
 - 目录预设：从仓库 `presets/strix/` 重新拷贝到 `~/.dsh/.agent-presets/`。
 - 插件副本：0.13.0 在 0.1.6 桌面上同样工作（jobs 双方言 + 守卫），无需降级；若要降回 0.12.11，按同一路径覆盖三副本即可。
 
-## 0.1.7-rc.1 增补（2026-09-24 核查，桌面尚未重建）
+## 0.1.7-rc.1 升级实录（2026-09-24 执行，全部通过）
+
+- 构建：checkout `46a7f68b09` → 6 补丁原样重打（锚点零冲突）→ 无新孤儿目录 → 新构建根 `dsh-rc1-desktop-build`（alpha.2 产物保留在 `dsh17-desktop-build` 作回滚件）→ win-unpacked 1.2G 产出（NSIS 同款宏冲突，预期内跳过）。补丁归档 `desktop-upstream-patches-0.1.7-rc.1.diff`。
+- 产物验证：version `0.1.7-rc.1`、策略键 ABSENT、appId 沿用、`dshBuildCommit=46a7f68b09`、fs-ext 在列。
+- 部署：sessions 备份 → `~/.dsh-sessions-backup-20260924`；程序目录替换；三副本 0.13.1（profile + app.asar.unpacked）。
+- 启动验证：**peer 强制校验静默通过**（零 disabling 告警——strix 0.13.1 五版本范围 + OV 0.5.2 天然覆盖，双双合规）；注册行恰好一次；roster 五预设含 strix 无 broken；session/create + prompt 实测整轮闭环（OV splice `kind=plugin:openviking-memory` 入账，模型 8 秒回复，20:44 实录）。
+
+## 0.1.7-rc.1 增补（2026-09-24 核查；同日已执行，见上实录）
 
 - **peer 兼容性强制回归（rc.1 唯一结构性变化）**：app-boot 新增 compatibility-preflight——每个 @deepseek-ai/dsh* peer 用 semver.satisfies(includePrerelease) 对照运行时版本，不满足即把插件行 disabled（profile 行与预设挂载行都查，stderr 打 `disabling profile plugin`）。豁免 = 精确 plugin@version → 精确运行时版本授权（`dsh plugin allow-version` 或插件管理页）。**strix-dsh-tools 已发 0.13.1 加 `|| 0.1.7-rc.1`**；OV memory plugin 0.5.2 的范围（>=0.1.0-rc.6 <0.2.0）天然覆盖。
 - 插件面其余零 API 变化（core/jobs/approval/skill src 零 diff，cordis 4.0.4 / schemastery 3.18.4 同版）；预设注册表新增 readDocument（UI 查看预设组合，无影响）。
