@@ -67,6 +67,13 @@ copy cordis.patch.yml package.json icon.svg "%RT%/"
 - 目录预设：从仓库 `presets/strix/` 重新拷贝到 `~/.dsh/.agent-presets/`。
 - 插件副本：0.13.0 在 0.1.6 桌面上同样工作（jobs 双方言 + 守卫），无需降级；若要降回 0.12.11，按同一路径覆盖三副本即可。
 
+## 0.1.7-rc.1 增补（2026-09-24 核查，桌面尚未重建）
+
+- **peer 兼容性强制回归（rc.1 唯一结构性变化）**：app-boot 新增 compatibility-preflight——每个 @deepseek-ai/dsh* peer 用 semver.satisfies(includePrerelease) 对照运行时版本，不满足即把插件行 disabled（profile 行与预设挂载行都查，stderr 打 `disabling profile plugin`）。豁免 = 精确 plugin@version → 精确运行时版本授权（`dsh plugin allow-version` 或插件管理页）。**strix-dsh-tools 已发 0.13.1 加 `|| 0.1.7-rc.1`**；OV memory plugin 0.5.2 的范围（>=0.1.0-rc.6 <0.2.0）天然覆盖。
+- 插件面其余零 API 变化（core/jobs/approval/skill src 零 diff，cordis 4.0.4 / schemastery 3.18.4 同版）；预设注册表新增 readDocument（UI 查看预设组合，无影响）。
+- **6 处构建补丁锚点全部完好**（desktop-build-paths / electron-builder-config / prepare-dsh 三文件变动在无关区域），重建 rc.1 桌面时原样重打即可；官方仍无桌面安装包（0 assets、feed 404）。
+- 重建清单：checkout rc.1 → 重打 6 补丁 → 清孤儿 node_modules 目录（如有）→ `DSH_DESKTOP_BUILD_ROOT` 指工作区外新目录 → `package:desktop:win:x64:unsigned` → win-unpacked 替换 → 三副本同步 0.13.1。
+
 ## 附录：升级实录（2026-09-23 执行）
 
 ### 构建侧（dsh-upstream @ dsh-v0.1.7-alpha.2，6 处补丁）
