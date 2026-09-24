@@ -333,5 +333,3 @@ export function registerBrowser(ctx: Context, config: ConfigType) {
     }),
   )
 }
-
-export { playwrightUnavailable }

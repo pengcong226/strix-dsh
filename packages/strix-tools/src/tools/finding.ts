@@ -8,7 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { jobsCaller, listTrackedShellJobs } from '../lib/jobs.js'
@@ -822,7 +822,7 @@ export function registerReport(ctx: Context, config: ConfigType) {
             '',
             String(args.recommendations),
           ].join('\n')
-          writeFileSync(reportPath, `${previous}\n${closing}`, 'utf8')
+          await writeFileAtomic(reportPath, `${previous}\n${closing}`)
           // Freeze: the closed report gets a stable final copy, and a stale
           // SARIF sidecar is refreshed so the delivered pair is consistent.
           const freezeNotes: string[] = []

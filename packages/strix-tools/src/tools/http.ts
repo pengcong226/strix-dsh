@@ -5,8 +5,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { ConfigType } from '../config.js'
 import { clampTimeoutMs, safeWorkspacePath, truncate, workspaceDir, workspaceSub } from '../lib/util.js'
 import { isAuthorizationExpired, matchesPreApprovedPost, readAuthorization, targetCoveredByAuth } from './authorization.js'
@@ -463,8 +463,6 @@ export function registerHttp(ctx: Context, config: ConfigType) {
         const dir = workspaceSub(config, 'responses')
         const target = safeWorkspacePath(dir, args.save_to)
         if (!target) return `${sent.text}${postNote}\nREJECTED: save_to must be a relative path inside workspace/responses/ (no .., no absolute paths).`
-        const { dirname } = await import('node:path')
-        const { mkdirSync } = await import('node:fs')
         mkdirSync(dirname(target), { recursive: true })
         writeFileSync(target, sent.rawBody, 'utf8')
         // The saved copy is the RECEIVED copy: when reception was cut at

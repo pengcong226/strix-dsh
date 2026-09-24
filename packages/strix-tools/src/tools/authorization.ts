@@ -15,10 +15,10 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConfigType } from '../config.js'
-import { workspaceDir } from '../lib/util.js'
+import { workspaceDir, writeFileAtomic } from '../lib/util.js'
 
 export interface PreApprovedPost {
   /** Exact path allowlisted for POST-only proofs, e.g. "/oas/forgetPassword". */
@@ -339,7 +339,7 @@ export function registerAuthorization(ctx: Context, config: ConfigType) {
             recorded_at: prev?.recorded_at ?? new Date().toISOString(),
             updated_at: prev ? new Date().toISOString() : undefined,
           }
-          writeFileSync(path, JSON.stringify(auth, null, 2), 'utf8')
+          await writeFileAtomic(path, JSON.stringify(auth, null, 2))
           const preNote = auth.pre_approved_post_paths?.length
             ? ` Plus ${auth.pre_approved_post_paths.length} pre-approved POST path(s) — matching strix_http POSTs proceed without asking.`
             : ''

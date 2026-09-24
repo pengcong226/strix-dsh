@@ -294,17 +294,19 @@ export function registerDepcheck(ctx: Context, config: ConfigType) {
           const expired = (): boolean => Date.now() > deadline
           const rows: DepFinding[] = []
           const results = batch.results ?? []
-          const work: Array<() => void> = []
+          const work: Array<() => DepFinding> = []
           for (let i = 0; i < pkgs.length; i++) {
             const pkg = pkgs[i]!
             const vulns = results[i]?.vulns ?? []
             for (const v of vulns) {
               work.push(() => {
-                // Deadline check at claim time: an item claimed after the
-                // budget is gone degrades to vuln-id-only (still listed, no
-                // detail/EPSS) instead of silently vanishing.
-                if (expired()) return
-                rows.push({
+                // The row lands at claim time, whatever the budget. The
+                // pre-fix code gated the push on !expired() while the comment
+                // promised "degrades to vuln-id-only (still listed)": rows
+                // claimed after the deadline silently VANISHED (30 vulns → 12
+                // listed), and the runItem then enriched rows[last] — another
+                // worker's row — duplicating detail fetches to no effect.
+                const row: DepFinding = {
                   package: pkg.name,
                   ecosystem: pkg.ecosystem,
                   version: pkg.version,
@@ -315,17 +317,21 @@ export function registerDepcheck(ctx: Context, config: ConfigType) {
                   kev_hit: false,
                   epss: null,
                   fixed_in: [],
-                })
+                }
+                rows.push(row)
+                return row
               })
             }
           }
           // Phase 1 (bounded pool): fetch OSV detail + EPSS for each vuln,
-          // mutating the row in place. Items claimed after the deadline
-          // degrade to vuln-id-only rows via the expired() check above.
+          // mutating the pool-returned row in place. Items claimed after the
+          // deadline keep their vuln-id-only row (already pushed above) and
+          // skip enrichment — the report counts and lists them via the
+          // degrade note instead of hiding them.
           await runPool(work, ENRICH_CONCURRENCY, async (claim) => {
-            claim()
-            const row = rows[rows.length - 1]
-            if (!row || row.vuln_id === undefined) return
+            const row = claim()
+            if (expired()) return
+            if (row.vuln_id === undefined) return
             try {
               const detail = (await fetchJson(`${OSV_VULN}${encodeURIComponent(row.vuln_id)}`)) as Record<string, unknown>
               const parsed = parseOsvVuln(detail)

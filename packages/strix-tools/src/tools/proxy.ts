@@ -154,7 +154,8 @@ export async function stopSidecarWith(
   }
 }
 
-async function sidecarState(config: ConfigType): Promise<{ running: boolean; pid?: number; port?: number; container?: string; nonce?: string }> {  const file = join(proxyDir(config), 'sidecar.json')
+async function sidecarState(config: ConfigType): Promise<{ running: boolean; pid?: number; port?: number; container?: string; nonce?: string }> {
+  const file = join(proxyDir(config), 'sidecar.json')
   if (!existsSync(file)) return { running: false }
   try {
     const state = JSON.parse(readFileSync(file, 'utf8')) as { pid: number; port: number; nonce?: string }
@@ -253,7 +254,6 @@ export function registerProxy(ctx: Context, config: ConfigType) {
       async execute(raw: Record<string, unknown>, exec): Promise<string> {
         const args = raw as unknown as { action: string; port?: number; filter?: string; limit?: number; id?: string }
         const dir = proxyDir(config)
-        void dir
 
         if (args.action === 'status') {
           const state = await sidecarState(config)

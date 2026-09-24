@@ -161,6 +161,9 @@ function coverageKind(outcome: string): string {
     case 'finding':
       return 'pass'
     case 'needs_follow_up':
+    case 'blocked':
+      // A blocked surface is unresolved work (a control stopped the
+      // assessment), not "not applicable" — it belongs with open gaps.
       return 'open'
     default:
       return 'notApplicable'

@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import * as yaml from 'js-yaml'
 import type { ConfigType } from '../src/config.js'
 import { nextIdAmong, nextSequentialId, runProcess, clampTimeoutMs, safeId, safeWorkspacePath, truncate, writeExclusive, writeFileAtomic } from '../src/lib/util.js'
@@ -17,7 +17,7 @@ import { registerNotes } from '../src/tools/notes.js'
 import { checkExtraArgs, SEMGREP_BLOCKED_EXTRA_FLAGS, semgrepTargetAllowed } from '../src/tools/sast.js'
 import { createApprovalGate, matchesAutoAllow, splitApprovalSummary } from '../src/lib/approval.js'
 import { methodologySection } from '../src/index.js'
-import { formatDepFinding, parseOsvVuln, readKevCache, runPool, sortDepFindings } from '../src/tools/depcheck.js'
+import { formatDepFinding, parseOsvVuln, readKevCache, registerDepcheck, runPool, sortDepFindings } from '../src/tools/depcheck.js'
 import { parseRawRequest, evaluatePostPolicy, sendHttpRequest, STATE_CHANGING_METHODS, normalizePathKey } from '../src/tools/http.js'
 import { SEVERITIES, VULN_TYPES, authorizationSummary, checkDuplicate, CLOSE_MARKER, convergeJobsAtFinish, evidenceRefDrift, listFindings, missingFinishSections, normalizeEvidenceRefs, registerFinding, registerReport, validateCvssVector, validateFinding } from '../src/tools/finding.js'
 import { OUTCOMES, readLedger, registerCoverage, writeLedger } from '../src/tools/coverage.js'
@@ -523,6 +523,60 @@ describe('depcheck pure helpers', () => {
   it('runPool handles an empty item list without starting lanes', async () => {
     const outcomes = await runPool([] as number[], 4, async () => { throw new Error('must not run') })
     expect(outcomes).toEqual([])
+  })
+})
+
+describe('depcheck check under an enrichment deadline', () => {
+  it('lists EVERY vuln after the budget expires — vuln-id-only rows, never dropped (P1 regression)', async () => {
+    // 2 packages × 6 vulns; detail fetches take 80ms while the enrichment
+    // budget is 50ms. The 6-lane pool claims the first wave at t≈0 (enriched
+    // by t≈80ms); the second wave is claimed past the deadline. Pre-fix,
+    // those claims returned BEFORE pushing their row and 6 of the 12 vulns
+    // silently vanished — the output claimed "6 known vuln(s)" as complete.
+    const packages = [
+      { ecosystem: 'npm', name: 'pkg-a', version: '1.0.0' },
+      { ecosystem: 'npm', name: 'pkg-b', version: '1.0.0' },
+    ]
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const u = String(url)
+      if (u.includes('querybatch')) {
+        return {
+          ok: true,
+          json: async () => ({
+            results: packages.map(() => ({
+              vulns: Array.from({ length: 6 }, (_, i) => ({ id: `VULN-2026-${String(i).padStart(4, '0')}` })),
+            })),
+          }),
+        }
+      }
+      if (u.includes('/vulns/')) {
+        await new Promise((r) => setTimeout(r, 80))
+        return {
+          ok: true,
+          json: async () => ({
+            aliases: ['CVE-2026-0001'],
+            summary: 'a summary',
+            severity: [{ type: 'CVSS_V3', score: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H' }],
+            affected: [],
+          }),
+        }
+      }
+      return { ok: true, json: async () => ({ vulnerabilities: [{ cveID: 'CVE-2026-0001' }] }) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const config = { ...scratchConfig(), depcheckTimeoutMs: 50 }
+      const registered: Array<{ name: string; execute: (args: unknown) => Promise<string> }> = []
+      registerDepcheck({ tools: { register: (t: object) => registered.push(t as { name: string; execute: (args: unknown) => Promise<string> }) } } as never, config)
+      const out = await registered[0]!.execute({ action: 'check', packages })
+      const listed = (out.match(/^- /gm) ?? []).length
+      expect(listed).toBe(12)
+      expect(out).toContain('12 known vuln(s) in 2 package(s)')
+      // The second wave degraded honestly instead of disappearing.
+      expect(out).toMatch(/enrichment budget: 6 row\(s\) listed as vuln-id only/)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 
@@ -1410,6 +1464,16 @@ describe('sarif sidecar', () => {
   it('keys rules on vulnerability class and coverage area', () => {
     expect(findingRuleId(finding)).toBe('strix/sqli')
     expect(coverageRuleId(coverageEntries[1]!)).toBe('strix/coverage/xss')
+  })
+
+  it('maps blocked coverage to open, not notApplicable (unresolved work)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const doc = buildSarifDocument([], [
+      { id: 'C-010', surface: 'http://example.com/waf', risk_area: 'SQLi', outcome: 'blocked', evidence_note: 'WAF RST', recorded_at: 't0' },
+      { id: 'C-011', surface: 'http://example.com/static', risk_area: 'info', outcome: 'ruled_out', evidence_note: 'no params', recorded_at: 't0' },
+    ]) as any
+    const kinds = doc.runs[0].results.map((r: { kind: string }) => r.kind)
+    expect(kinds).toEqual(['open', 'notApplicable'])
   })
 
   it('builds a 2.1.0 document with fail findings and non-failing coverage', () => {
@@ -2643,6 +2707,22 @@ describe('preset declaration consistency', () => {
     expect(cfg.name).toBe(presetYml.name)
     expect(cfg.description).toBe(presetYml.description)
     expect(cfg.order).toBe(presetYml.order)
+  })
+
+  it('headless overlay operator persona and deny list match the directory form (drift fence)', () => {
+    // strix-operator.patch.yml mirrors the strix preset's tool-strix-operator
+    // row for --patch headless runs; if either persona or deny drifts, the
+    // headless operator silently behaves differently from the preset operator.
+    const overlay = parse(new URL('../../../strix-operator.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const overlayRow = overlay[0]!.insert[0]!
+    expect(overlayRow).toMatchObject({ id: 'tool-strix-operator', name: '@deepseek-ai/dsh-tool-subagent' })
+    const directory = parse(new URL('../../../presets/strix/agent.cordis.yml', import.meta.url)) as Array<Record<string, unknown>>
+    const delegation = directory.find((r) => r.id === 'delegation')!
+    const presetRow = ((delegation.config as Array<Record<string, unknown>>)).find((r) => r.id === 'tool-strix-operator')!
+    const oCfg = overlayRow.config as Record<string, unknown>
+    const pCfg = presetRow.config as Record<string, unknown>
+    eq(oCfg.persona, pCfg.persona, 'persona')
+    eq(oCfg.toolFilter, pCfg.toolFilter, 'toolFilter')
   })
 
   it('locale metadata files parse and carry meta title/description', () => {
