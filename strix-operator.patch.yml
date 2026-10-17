@@ -27,8 +27,8 @@
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: strix-operator
-        name: strix-dsh 执行者
-        description: StriX-DH 叶子执行者——完整动手工具，无派发/workflow/goal/present，供 strix_operator 调用。
+        name: strix-dsh 执行者（内部·供 strix_operator 派发）
+        description: 内部叶子身份，日常不用手动选——strix-dsh 模式派发 strix_operator 时自动挂载。工具与编排者相同，但无派发/workflow/goal/present。
         order: 11
         plugins:
           # ── identity ──────────────────────────────────────────────────────
@@ -123,6 +123,30 @@
 
           - id: tool-skill
             name: '@deepseek-ai/dsh-tool-skill'
+
+          # Plan mode: same as the bundle preset. A headless one-shot run
+          # rarely uses it, but an operator child must be identical no matter
+          # which runtime spawned it — a missing row here would silently make
+          # the headless operator a slightly different agent.
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads and workspace state to ground the plan in the actual engagement: strix_runs, strix_coverage list, strix_finding list, strix_notes list, threat-model get. Do not send attack traffic, run containers, or otherwise carry out testing while planning — plan it. Prefer prior coverage and existing tools over new machinery.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using execution tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection (workspace state, prior findings, coverage, notes). This composition deliberately ships NO user-question tool: the operator's input arrives as ordinary messages, and a plan must never wait on a question — state assumptions explicitly in the plan instead.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and execution begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with execution.
 
           - id: compaction
             name: cordis:group

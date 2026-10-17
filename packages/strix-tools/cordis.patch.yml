@@ -307,8 +307,8 @@
         return false } catch { return true } })()
       config:
         id: strix-operator
-        name: strix-dsh 执行者
-        description: StriX-DH 叶子执行者——完整动手工具，无派发/workflow/goal/present，供 strix_operator 调用。
+        name: strix-dsh 执行者（内部·供 strix_operator 派发）
+        description: 内部叶子身份，日常不用手动选——strix-dsh 模式派发 strix_operator 时自动挂载。工具与编排者相同，但无派发/workflow/goal/present。
         order: 11
         plugins:
           # ── identity ──────────────────────────────────────────────────────

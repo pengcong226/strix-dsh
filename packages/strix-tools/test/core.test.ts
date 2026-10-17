@@ -2855,6 +2855,40 @@ describe('preset declaration consistency', () => {
     expect(presetIds).toContain('strix-operator')
   })
 
+  it('overlay operator composition matches the bundle preset row for row', () => {
+    // The overlay's operator must be the SAME agent as the bundle preset's,
+    // whatever runtime spawned it. Comparing row ids (not full configs) keeps
+    // the check meaningful without duplicating every row's payload here.
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const bundle = patch[0]!.insert.find((r) => r.id === 'preset-strix-operator')!
+    const bundleRows = ((bundle.config as Record<string, unknown>).plugins as Array<Record<string, unknown>>).map((r) => r.id)
+
+    const overlay = parse(new URL('../../../strix-operator.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const overlayPreset = overlay[0]!.insert.find((r) => r.id === 'preset-strix-operator')!
+    const overlayRows = ((overlayPreset.config as Record<string, unknown>).plugins as Array<Record<string, unknown>>).map((r) => r.id)
+
+    expect(overlayRows).toEqual(bundleRows)
+    // Identity metadata is what the picker shows, so it must agree too.
+    const b = bundle.config as Record<string, unknown>
+    const o = overlayPreset.config as Record<string, unknown>
+    expect(o.name).toBe(b.name)
+    expect(o.description).toBe(b.description)
+    expect(o.order).toBe(b.order)
+  })
+
+  it('operator preset is labelled as an internal child identity', () => {
+    // It appears in the mode picker (the declaration schema has no `hidden`
+    // field), yet its persona says "report back to THE ORCHESTRATOR" and it has
+    // no `present` tool — so the label must warn a human off selecting it.
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const cfg = patch[0]!.insert.find((r) => r.id === 'preset-strix-operator')!.config as Record<string, unknown>
+    expect(String(cfg.name)).toContain('内部')
+    expect(String(cfg.description)).toMatch(/派发|strix_operator/)
+    // The orchestrator preset must NOT be labelled internal.
+    const strix = patch[0]!.insert.find((r) => r.id === 'preset-strix')!.config as Record<string, unknown>
+    expect(String(strix.name)).not.toContain('内部')
+  })
+
   it('locale metadata files parse and carry meta title/description', () => {
     for (const locale of ['en', 'zh']) {
       const meta = JSON.parse(readFileSync(new URL(`../locale/${locale}.json`, import.meta.url), 'utf8')) as { meta?: { title?: unknown; description?: unknown } }
