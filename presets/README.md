@@ -59,9 +59,11 @@ dsh **0.1.7 起不再读取 `~/.dsh/.agent-presets/` 目录预设**，预设改�
 
 **部署矩阵**（预设声明行从哪里来）：
 
-- **bundle 安装**（`dsh plugin install` / 插件管理页，插件进 profile bundles）：插件自带的 `cordis.patch.yml` 自动声明预设，无需手工步骤。boot 注册行出现**两次**（宿主行 + 预设 eager 挂载）属预期；代价是宿主层挂载让所有模式会话都看到 16 工具（对非渗透会话是提示词污染，bffa682 修过的同款问题）。
-- **桌面隔离布局**（bffa682：插件只进 dependencies 不进 bundles）：插件 patch 不应用，**必须把 `preset-strix` 与 `preset-strix-operator` 两行手工加入 profile 的 `cordis.patch.yml`**（从插件 patch 文件中原样拷贝，守卫保留）。注册行恰好一次。见 docs/desktop-upgrade-0.1.7.md。
+- **bundle 安装**（`dsh plugin install` / 插件管理页，插件进 profile bundles）：插件自带的 `cordis.patch.yml` 自动声明预设，无需手工步骤。boot 注册行出现**两次**（宿主行 + 预设 eager 挂载）属预期；代价是宿主层挂载让**所有模式会话**都看到 16 工具（对非渗透会话是提示词污染，bffa682 修过的同款问题）。实测：headless profile（bundles 含 `strix-dsh-tools`）里问 `standard` 会话"你有 strix_http 吗"，模型答 **YES**。
+- **桌面隔离布局**（bffa682：插件只进 dependencies 不进 bundles）：插件 patch 不应用，**必须把 `preset-strix` 与 `preset-strix-operator` 两行手工加入 profile 的 `cordis.patch.yml`**（从插件 patch 文件中原样拷贝，守卫保留）。0.13.4 起两个预设各 eager 挂载一次，故注册行**两行**（此前单预设有"恰好一次"的验收信号，现已不适用）。见 docs/desktop-upgrade-0.1.7.md。
   - **漏掉 `preset-strix-operator` 的症状**：预设列表正常、无 broken，但 `strix_operator` 派发时才报 `Unknown agent preset: strix-operator`。
+  - **漏掉整个插件的症状**：boot 日志出现 `preset-strix (@deepseek-ai/dsh-agent-preset): pending (waiting for service: agentPresets)`——`dsh-base` 不提供 `agentPresets` 服务，隔离布局下孤儿预设声明永远 pending，roster 里两个 strix 预设都不会出现。**这是"插件漏进 bundles 目录残留"的信号，不是预设配置错。**
+  - **两层同时存在**（插件既在 bundles、profile patch 又贴了同样的两行）：预设被声明两次，`Duplicate agent preset` 不触发是因为 patch 层后写覆盖同 id；实测生效的是 **profile patch 那份**（把它的 `order` 改成 77，roster 显示 77）。功能可用但属配置冗余，诊断时易误导。
 
 ## headless overlay（`strix-operator.patch.yml`）
 
@@ -110,4 +112,4 @@ curl -s -b c.txt -X POST "http://127.0.0.1:PORT/api/agentPresets/list" \
 # 再用 session/create（args.request.agentPreset="strix"）验证预设真实可组合。
 ```
 
-0.1.7 注册表 eager 挂载预设：boot 日志即出现一次 `registered 16 tool modules + ...` 注册行（隔离布局）；0.1.6 目录版则是惰性挂载，注册行在首个 strix 会话创建时才出现。
+0.1.7 注册表 eager 挂载预设：boot 日志即出现注册行（隔离布局下每个预设一次，0.13.4 起为**两行**）；0.1.6 目录版则是惰性挂载，注册行在首个 strix 会话创建时才出现。

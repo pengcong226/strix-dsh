@@ -54,7 +54,7 @@ copy cordis.patch.yml package.json icon.svg "%RT%/"
 ## 4. 验证清单
 
 1. 启动应用：**无强制更新遮罩**（构建侧第 7 补丁生效，见交接清单 §3.3）。
-2. 启动日志中 `registered 16 tool modules + methodology + authorization sections + 75 skills` **恰好一次**（0.1.7 注册表 eager 挂载预设，隔离布局下注册行唯一来源是预设行；出现两次 = 插件进了 bundles，提示词污染回归）。
+2. 启动日志中 `registered 16 tool modules + methodology + authorization sections + 75 skills` 出现**两次**（0.13.4 起两个预设各 eager 挂载一次；隔离布局下注册行的唯一来源是预设行。出现**三次以上** = 插件进了 bundles，提示词污染回归。0.13.4 之前单预设时为"恰好一次"）。
 3. WebUI 新建会话的模式选择器里有 **strix-dsh 模式**；或用 roster 查询（presets/README.md「验证（0.1.7+）」节的 curl 两步）确认 `strix` 在列且无 `broken`。
 4. 建 strix 会话发一条消息，确认工具调用正常（jobs 双方言自动选择，无需配置）。
 5. 跑一条 `pwsh` 后台命令验证 0.1.7 的"持久 PowerShell 完成不再额外等待"修复；连续完成多个后台命令后会话不再卡住等输入。
