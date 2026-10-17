@@ -2683,7 +2683,7 @@ describe('preset declaration consistency', () => {
     const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
     expect(patch).toHaveLength(1)
     const rows = patch[0]!.insert
-    expect(rows).toHaveLength(2)
+    expect(rows).toHaveLength(3)
     expect(rows[0]).toMatchObject({ id: 'strix-tools', name: 'strix-dsh-tools' })
     const preset = rows[1]!
     expect(preset).toMatchObject({ id: 'preset-strix', name: '@deepseek-ai/dsh-agent-preset' })
@@ -2692,12 +2692,105 @@ describe('preset declaration consistency', () => {
     expect(preset.config).toMatchObject({ id: 'strix', order: 10 })
   })
 
-  it('preset row plugins are identical to the 0.1.6 directory form (drift fence)', () => {
+  it('declares the operator preset the strix_operator row selects', () => {
+    // dsh 0.2.x removed row-level persona/toolFilter, so the operator row points
+    // at a preset. A dangling agentPreset id fails only at DISPATCH time, when a
+    // live engagement needs a child — assert the declaration exists here.
     const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
-    const plugins = ((patch[0]!.insert[1]!.config as Record<string, unknown>).plugins) as unknown[]
-    const directory = parse(new URL('../../../presets/strix/agent.cordis.yml', import.meta.url)) as unknown[]
-    expect(plugins.length).toBe(directory.length)
-    eq(plugins, directory, 'plugins')
+    const rows = patch[0]!.insert
+    const opPreset = rows[2]!
+    expect(opPreset).toMatchObject({ id: 'preset-strix-operator', name: '@deepseek-ai/dsh-agent-preset' })
+    const guard = opPreset.disabled as { __jsExpr: string }
+    expect(guard.__jsExpr).toContain("resolve('@deepseek-ai/dsh-agent-preset/package.json')")
+    const cfg = opPreset.config as Record<string, unknown>
+    expect(cfg).toMatchObject({ id: 'strix-operator', order: 11 })
+
+    // The strix preset's dispatch row must name exactly this preset.
+    const strixPlugins = ((rows[1]!.config as Record<string, unknown>).plugins) as Array<Record<string, unknown>>
+    const delegation = strixPlugins.find((r) => r.id === 'delegation')!
+    const dispatchRow = ((delegation.config as Array<Record<string, unknown>>)).find((r) => r.id === 'tool-strix-operator')!
+    expect((dispatchRow.config as Record<string, unknown>).agentPreset).toBe(cfg.id)
+  })
+
+  it('operator preset omits every delegation, workflow, goal and present row', () => {
+    // The old `toolFilter.deny` list became an ABSENCE: an operator that can
+    // dispatch turns single-level fan-out into unbounded recursion.
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const plugins = ((patch[0]!.insert[2]!.config as Record<string, unknown>).plugins) as Array<Record<string, unknown>>
+    const ids = plugins.map((r) => r.id)
+    for (const forbidden of ['tool-subagent', 'tool-subagent-fork', 'tool-strix-operator', 'workflow-ptc', 'tool-workflow', 'tool-ralph', 'tool-goal', 'command-goal', 'present']) {
+      expect(ids, `${forbidden} must not be mountable by an operator child`).not.toContain(forbidden)
+    }
+    // ...while the report channel stays, or a leaf cannot hand off at all.
+    expect(ids).toContain('tool-subagent-control')
+  })
+
+  it('preset row plugins are identical to the 0.1.6 directory form (drift fence)', () => {
+    // The two forms serve MUTUALLY EXCLUSIVE runtimes: the directory form feeds
+    // dsh <=0.1.6, where row-level persona/toolFilter are the only mechanism,
+    // and dsh 0.2.x THROWS on those fields. They therefore cannot be byte-equal
+    // any more — every row except the operator dispatch row still must be.
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const strip = (plugins: unknown[]): unknown[] =>
+      plugins
+        .map((raw) => {
+          const row = raw as Record<string, unknown>
+          if (row.id !== 'delegation') return row
+          const children = (row.config as Array<Record<string, unknown>>).filter((r) => r.id !== 'tool-strix-operator')
+          return { ...row, config: children }
+        })
+    const patchPlugins = strip(((patch[0]!.insert[1]!.config as Record<string, unknown>).plugins) as unknown[])
+    const directory = strip(parse(new URL('../../../presets/strix/agent.cordis.yml', import.meta.url)) as unknown[])
+    expect(patchPlugins.length).toBe(directory.length)
+    eq(patchPlugins, directory, 'plugins')
+  })
+
+  it('operator persona and leaf policy agree across form, preset and overlay', () => {
+    // Three copies encode one operator: the <=0.1.6 directory row (persona +
+    // toolFilter), the 0.2.x preset declaration, and the headless overlay.
+    // Drift here silently gives headless/parallel children a different identity
+    // or, worse, a different set of forbidden tools.
+    const text = (v: unknown): string =>
+      String((v as { __jsExpr?: string } | undefined)?.__jsExpr ?? v ?? '')
+        .replace(/\r\n/g, '\n')
+        .replace(/[ \t]+$/gm, '')
+        .trim()
+
+    const directory = parse(new URL('../../../presets/strix/agent.cordis.yml', import.meta.url)) as Array<Record<string, unknown>>
+    const delegation = directory.find((r) => r.id === 'delegation')!
+    const dirCfg = ((delegation.config as Array<Record<string, unknown>>).find((r) => r.id === 'tool-strix-operator')!.config) as Record<string, unknown>
+
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const presetPlugins = ((patch[0]!.insert[2]!.config as Record<string, unknown>).plugins) as Array<Record<string, unknown>>
+    const presetPersona = (presetPlugins.find((r) => r.id === 'persona')!.config as Record<string, unknown>).prefix
+
+    const overlay = parse(new URL('../../../strix-operator.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const overlayPreset = overlay[0]!.insert.find((r) => r.id === 'preset-strix-operator')!
+    const overlayPlugins = (overlayPreset.config as Record<string, unknown>).plugins as Array<Record<string, unknown>>
+    const overlayPersona = (overlayPlugins.find((r) => r.id === 'persona')!.config as Record<string, unknown>).prefix
+
+    expect(text(dirCfg.persona).length, 'directory persona must not be empty').toBeGreaterThan(0)
+    expect(text(presetPersona), 'preset persona drifted from the directory form').toBe(text(dirCfg.persona))
+    expect(text(overlayPersona), 'overlay persona drifted from the directory form').toBe(text(dirCfg.persona))
+
+    // The overlay's leaf policy is the same ABSENCE the preset encodes.
+    const overlayIds = overlayPlugins.map((r) => r.id)
+    for (const forbidden of ['tool-subagent', 'tool-subagent-fork', 'tool-strix-operator', 'tool-workflow', 'tool-ralph', 'tool-goal', 'present']) {
+      expect(overlayIds, `overlay ${forbidden} must not be mountable`).not.toContain(forbidden)
+    }
+    expect(overlayIds).toContain('tool-subagent-control')
+
+    // Deny list (directory, <=0.1.6) and absence list (0.2.x) must name the
+    // same tools — otherwise the two runtimes disagree about what a leaf is.
+    const deny = ((dirCfg.toolFilter as Record<string, unknown>).deny as string[]).slice().sort()
+    expect(deny).toEqual(
+      ['create_goal', 'get_goal', 'present', 'ralph', 'strix_operator', 'subagent', 'subagent_fork', 'update_goal', 'workflow'].sort(),
+    )
+    // create_goal/get_goal/update_goal/ralph are absent because their presets
+    // omit the goal and ralph rows entirely; the rest are checked above.
+    for (const name of ['subagent', 'subagent_fork', 'strix_operator', 'workflow', 'present']) {
+      expect(deny, `${name} must stay denied on 0.1.6`).toContain(name)
+    }
   })
 
   it('preset.yml identity fields match the declaration row', () => {
@@ -2709,20 +2802,57 @@ describe('preset declaration consistency', () => {
     expect(cfg.order).toBe(presetYml.order)
   })
 
-  it('headless overlay operator persona and deny list match the directory form (drift fence)', () => {
-    // strix-operator.patch.yml mirrors the strix preset's tool-strix-operator
-    // row for --patch headless runs; if either persona or deny drifts, the
-    // headless operator silently behaves differently from the preset operator.
+  it('operator preset declares no removed tool-subagent fields', () => {
+    // dsh 0.2.0 THROWS at load on `persona` / `toolFilter`, and one bad row
+    // takes the whole preset down. `backgroundMode` is only ignored, so it may
+    // stay for 0.1.x parity — see presets/README.md.
+    const banned = ['persona', 'toolFilter']
+    const check = (row: Record<string, unknown>, where: string): void => {
+      if (row.name !== '@deepseek-ai/dsh-tool-subagent') return
+      const cfg = (row.config ?? {}) as Record<string, unknown>
+      for (const field of banned) {
+        expect(cfg, `${where}/${String(row.id)} must not set ${field} (0.2.x throws)`).not.toHaveProperty(field)
+      }
+    }
+    // Every row shape must be visited: a DISPATCH row carries its config
+    // directly, a PRESET row carries `config.plugins`. The original bug was a
+    // direct-config row, so checking only preset children misses it entirely.
+    const visit = (rows: Array<Record<string, unknown>>, where: string): void => {
+      for (const row of rows) {
+        const cfg = (row.config ?? {}) as Record<string, unknown>
+        if (Array.isArray(cfg.plugins)) visit(cfg.plugins as Array<Record<string, unknown>>, `${where}/${String(row.id)}`)
+        else check(row, where)
+      }
+    }
+
+    const patch = parse(new URL('../cordis.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    visit(patch[0]!.insert, 'bundle')
+
     const overlay = parse(new URL('../../../strix-operator.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
-    const overlayRow = overlay[0]!.insert[0]!
-    expect(overlayRow).toMatchObject({ id: 'tool-strix-operator', name: '@deepseek-ai/dsh-tool-subagent' })
-    const directory = parse(new URL('../../../presets/strix/agent.cordis.yml', import.meta.url)) as Array<Record<string, unknown>>
-    const delegation = directory.find((r) => r.id === 'delegation')!
-    const presetRow = ((delegation.config as Array<Record<string, unknown>>)).find((r) => r.id === 'tool-strix-operator')!
-    const oCfg = overlayRow.config as Record<string, unknown>
-    const pCfg = presetRow.config as Record<string, unknown>
-    eq(oCfg.persona, pCfg.persona, 'persona')
-    eq(oCfg.toolFilter, pCfg.toolFilter, 'toolFilter')
+    visit(overlay[0]!.insert, 'overlay')
+  })
+
+  it('overlay declares the preset registry its agentPreset resolution needs', () => {
+    // dsh-base mounts no agent-presets service, so an overlay that names
+    // `agentPreset` without declaring the registry fails only at dispatch.
+    const overlay = parse(new URL('../../../strix-operator.patch.yml', import.meta.url)) as Array<{ insert: Array<Record<string, unknown>> }>
+    const rows = overlay[0]!.insert
+    const ids = rows.map((r) => r.id)
+    expect(ids).toContain('agent-preset-registry')
+    expect(ids).toContain('preset-strix-operator')
+
+    const registry = rows.find((r) => r.id === 'agent-preset-registry')!
+    expect(registry.name).toBe('@deepseek-ai/dsh-agent-preset-registry')
+    // The registry's default must name a declaration this overlay actually
+    // ships, or any caller that omits the id gets "Unknown agent preset".
+    const presetIds = rows
+      .filter((r) => r.name === '@deepseek-ai/dsh-agent-preset')
+      .map((r) => (r.config as Record<string, unknown>).id)
+    expect(presetIds).toContain((registry.config as Record<string, unknown>).default)
+
+    const dispatch = rows.find((r) => r.id === 'tool-strix-operator')!
+    expect((dispatch.config as Record<string, unknown>).agentPreset).toBe('strix-operator')
+    expect(presetIds).toContain('strix-operator')
   })
 
   it('locale metadata files parse and carry meta title/description', () => {

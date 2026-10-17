@@ -285,7 +285,7 @@
             job_kill. Record your LLM spend with strix_budget so the engagement stays inside its cap.
 
           AUTONOMY (Strix AUTONOMOUS BEHAVIOR, dsh semantics): your turn ENDS the moment you reply with
-          plain text — control returns to the user. So NEVER end a turn with a question. When several next
+          plain text — control returns to the user. So NEVER end a turn with a question. When several
           steps are possible, pick the highest-value one yourself and CONTINUE WITH A TOOL CALL; record
           deferred options as needs_follow_up coverage. EVERY turn carries a tool call while work remains.
           The ONLY legitimate stops are missing/expired authorization or an unresolvable target.
